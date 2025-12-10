@@ -1,0 +1,84 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "AKS Network Policy Disabled or Missing",
+    "description": "Detects when pods are deployed without network policies, allowing unrestricted network access.",
+    "severity": "Low",
+    "requiredDataConnectors": [
+      {
+        "connectorId": "AzureKubernetesService",
+        "dataTypes": ["AzureDiagnostics"]
+      }
+    ],
+    "tactics": ["Discovery", "LateralMovement"],
+    "techniques": ["T1046"],
+    "version": "1.0.0"
+  },
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Log Analytics workspace name"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2025-09-01",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/aks-no-network-policy')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "AKS Namespace Without Network Policy",
+        "description": "Detects namespaces where pods are deployed but no network policies exist, potentially allowing unrestricted network access.",
+        "severity": "Low",
+        "enabled": true,
+        "query": "// Get namespaces with pods\nlet NamespacesWithPods = KubePodInventory\n| where TimeGenerated > ago(1h)\n| where PodStatus == \"Running\"\n| distinct Namespace, ClusterName;\n// Get namespaces with network policies\nlet NamespacesWithNetPol = AzureDiagnostics\n| where Category == \"kube-audit\"\n| where TimeGenerated > ago(24h)\n| extend log = parse_json(log_s)\n| extend objectRef = log.objectRef\n| where objectRef.resource == \"networkpolicies\"\n| extend Namespace = tostring(objectRef.namespace)\n| distinct Namespace, Resource;\n// Find namespaces without policies\nNamespacesWithPods\n| join kind=leftanti (NamespacesWithNetPol) on Namespace\n| where Namespace !in (\"kube-system\", \"kube-public\", \"kube-node-lease\", \"gatekeeper-system\", \"azure-arc\")\n| project ClusterName, Namespace\n| summarize Namespaces = make_set(Namespace) by ClusterName",
+        "queryFrequency": "P1D",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "P1D",
+        "suppressionEnabled": true,
+        "tactics": ["Discovery", "LateralMovement"],
+        "techniques": ["T1046"],
+        "alertRuleTemplateName": null,
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "P1D",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Host"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": ["ClusterName"]
+          }
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Namespaces Without Network Policies: {{ClusterName}}",
+          "alertDescriptionFormat": "The following namespaces in cluster '{{ClusterName}}' have running pods but no network policies: {{Namespaces}}"
+        },
+        "customDetails": {
+          "ClusterName": "ClusterName",
+          "Namespaces": "Namespaces"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Host",
+            "fieldMappings": [
+              {
+                "identifier": "HostName",
+                "columnName": "ClusterName"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

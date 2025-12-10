@@ -1,0 +1,88 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "AKS Suspicious Container Command Execution",
+    "description": "Detects execution of suspicious commands within containers that may indicate compromise.",
+    "severity": "Medium",
+    "requiredDataConnectors": [
+      {
+        "connectorId": "ContainerInsights",
+        "dataTypes": ["ContainerLog"]
+      }
+    ],
+    "tactics": ["Execution", "Discovery"],
+    "techniques": ["T1059", "T1082"],
+    "version": "1.0.0"
+  },
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Log Analytics workspace name"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2025-09-01",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/aks-suspicious-command')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "AKS Suspicious Container Command Execution",
+        "description": "Detects execution of suspicious commands within containers including reverse shells, crypto miners, and reconnaissance tools.",
+        "severity": "Medium",
+        "enabled": true,
+        "query": "let SuspiciousCommands = dynamic([\"curl\", \"wget\", \"nc\", \"netcat\", \"ncat\", \"socat\", \"python -c\", \"perl -e\", \"ruby -e\", \"bash -i\", \"sh -i\", \"/dev/tcp\", \"mkfifo\", \"base64 -d\", \"chmod +x\", \"chmod 777\", \"chattr\", \"xmrig\", \"minerd\", \"cpuminer\", \"stratum\", \"nmap\", \"masscan\", \"nikto\", \"sqlmap\", \"metasploit\", \"msfconsole\", \"msfvenom\"]);\nlet ReverseShellPatterns = dynamic([\"bash -i >& /dev/tcp\", \"nc -e /bin\", \"python -c 'import socket\", \"perl -e 'use Socket\", \"/bin/sh | nc\", \"rm /tmp/f;mkfifo\"]);\nContainerLog\n| where TimeGenerated > ago(5m)\n| where LogEntry has_any (SuspiciousCommands) or LogEntry has_any (ReverseShellPatterns)\n| extend\n    ContainerId = ContainerID,\n    LogMessage = LogEntry,\n    PodName = extract(\"pod=([^,]+)\", 1, tostring(parse_json(LogEntrySource))),\n    Namespace = extract(\"namespace=([^,]+)\", 1, tostring(parse_json(LogEntrySource)))\n| join kind=leftouter (\n    KubePodInventory\n    | where TimeGenerated > ago(1h)\n    | distinct ContainerID, PodName = Name, Namespace, ClusterName, ContainerName\n) on $left.ContainerId == $right.ContainerID\n| extend\n    MatchedCommand = extract(@\"(curl|wget|nc|netcat|ncat|socat|python -c|perl -e|ruby -e|bash -i|sh -i|/dev/tcp|mkfifo|base64 -d|chmod \\+x|chmod 777|chattr|xmrig|minerd|cpuminer|stratum|nmap|masscan|nikto|sqlmap|metasploit|msfconsole|msfvenom)\", 1, LogMessage),\n    IsReverseShell = LogMessage has_any (ReverseShellPatterns)\n| project\n    TimeGenerated,\n    ClusterName,\n    Namespace,\n    PodName,\n    ContainerName,\n    ContainerId,\n    MatchedCommand,\n    IsReverseShell,\n    LogMessage\n| summarize\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated),\n    CommandCount = count(),\n    Commands = make_set(MatchedCommand, 10)\n    by ClusterName, Namespace, PodName, ContainerName, IsReverseShell",
+        "queryFrequency": "PT5M",
+        "queryPeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT30M",
+        "suppressionEnabled": false,
+        "tactics": ["Execution", "Discovery"],
+        "techniques": ["T1059", "T1082"],
+        "alertRuleTemplateName": null,
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Host"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": ["ClusterName", "PodName"]
+          }
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Suspicious Command in Container: {{PodName}}",
+          "alertDescriptionFormat": "Suspicious commands detected in container '{{ContainerName}}' in pod '{{PodName}}'. Commands: {{Commands}}"
+        },
+        "customDetails": {
+          "ClusterName": "ClusterName",
+          "Namespace": "Namespace",
+          "PodName": "PodName",
+          "ContainerName": "ContainerName",
+          "CommandCount": "CommandCount",
+          "IsReverseShell": "IsReverseShell"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Host",
+            "fieldMappings": [
+              {
+                "identifier": "HostName",
+                "columnName": "ClusterName"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

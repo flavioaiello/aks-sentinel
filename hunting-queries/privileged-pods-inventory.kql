@@ -1,0 +1,75 @@
+// AKS Privileged Pods Inventory
+// Description: Lists all privileged pods and containers currently running in the cluster
+// Tactic: Discovery
+// Technique: T1613 - Container and Resource Discovery
+
+let LookbackPeriod = 7d;
+let SystemNamespaces = dynamic(["kube-system", "gatekeeper-system", "azure-arc", "calico-system", "tigera-operator"]);
+
+// Get the latest pod inventory
+KubePodInventory
+| where TimeGenerated > ago(LookbackPeriod)
+| where PodStatus == "Running"
+| summarize arg_max(TimeGenerated, *) by ContainerID, ClusterName
+| project
+    TimeGenerated,
+    ClusterName,
+    Namespace,
+    PodName = Name,
+    ContainerName,
+    ContainerID,
+    PodStatus,
+    PodCreationTimeStamp,
+    PodLabel,
+    ServiceName
+| join kind=leftouter (
+    AzureDiagnostics
+    | where Category == "kube-audit"
+    | where TimeGenerated > ago(LookbackPeriod)
+    | extend log = parse_json(log_s)
+    | where log.verb == "create"
+    | extend objectRef = log.objectRef
+    | where objectRef.resource == "pods"
+    | extend requestObject = log.requestObject
+    | extend containers = requestObject.spec.containers
+    | mv-expand container = containers
+    | extend
+        Privileged = tobool(container.securityContext.privileged),
+        HostNetwork = tobool(requestObject.spec.hostNetwork),
+        HostPID = tobool(requestObject.spec.hostPID),
+        HostIPC = tobool(requestObject.spec.hostIPC),
+        RunAsRoot = tostring(container.securityContext.runAsUser) == "0"
+    | where Privileged == true or HostNetwork == true or HostPID == true or HostIPC == true or RunAsRoot == true
+    | extend
+        PodName = tostring(objectRef.name),
+        Namespace = tostring(objectRef.namespace),
+        ContainerName = tostring(container.name),
+        ContainerImage = tostring(container.image)
+    | project PodName, Namespace, ContainerName, ContainerImage, Privileged, HostNetwork, HostPID, HostIPC, RunAsRoot
+    | summarize arg_max(TimeGenerated, *) by PodName, Namespace, ContainerName
+) on PodName, Namespace, ContainerName
+| where isnotempty(Privileged) or isnotempty(HostNetwork)
+| extend RiskScore = (
+    toint(Privileged == true) * 10 +
+    toint(HostNetwork == true) * 8 +
+    toint(HostPID == true) * 7 +
+    toint(HostIPC == true) * 6 +
+    toint(RunAsRoot == true) * 5
+)
+| extend IsSystemNamespace = Namespace in (SystemNamespaces)
+| project
+    ClusterName,
+    Namespace,
+    PodName,
+    ContainerName,
+    ContainerImage,
+    Privileged,
+    HostNetwork,
+    HostPID,
+    HostIPC,
+    RunAsRoot,
+    RiskScore,
+    IsSystemNamespace,
+    PodStatus,
+    PodCreationTimeStamp
+| sort by RiskScore desc, IsSystemNamespace asc

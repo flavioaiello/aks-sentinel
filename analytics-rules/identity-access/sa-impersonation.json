@@ -1,0 +1,105 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "AKS Service Account Impersonation",
+    "description": "Detects when a user impersonates a service account.",
+    "severity": "Critical",
+    "requiredDataConnectors": [
+      {
+        "connectorId": "AzureKubernetesService",
+        "dataTypes": ["AzureDiagnostics"]
+      }
+    ],
+    "tactics": ["PrivilegeEscalation", "DefenseEvasion"],
+    "techniques": ["T1078", "T1134"],
+    "version": "1.0.0"
+  },
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Log Analytics workspace name"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2025-09-01",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/aks-sa-impersonation')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "AKS Service Account Impersonation Detected",
+        "description": "Detects when a user impersonates a service account, which can be used for privilege escalation.",
+        "severity": "Critical",
+        "enabled": true,
+        "query": "AzureDiagnostics\n| where Category == \"kube-audit\"\n| where TimeGenerated > ago(5m)\n| extend log = parse_json(log_s)\n| extend impersonatedUser = log.impersonatedUser\n| extend user = log.user\n| extend sourceIPs = log.sourceIPs\n| extend verb = tostring(log.verb)\n| extend objectRef = log.objectRef\n| where isnotempty(impersonatedUser)\n| extend\n    ImpersonatedUsername = tostring(impersonatedUser.username),\n    ImpersonatedGroups = tostring(impersonatedUser.groups),\n    ActualUsername = tostring(user.username),\n    ActualGroups = tostring(user.groups),\n    SourceIP = tostring(sourceIPs[0]),\n    Resource_Type = tostring(objectRef.resource),\n    ResourceName = tostring(objectRef.name),\n    Namespace = tostring(objectRef.namespace),\n    Verb = verb,\n    ClusterName = Resource\n| where ImpersonatedUsername startswith \"system:serviceaccount:\"\n| project\n    TimeGenerated,\n    ClusterName,\n    ActualUsername,\n    ImpersonatedUsername,\n    ImpersonatedGroups,\n    SourceIP,\n    Verb,\n    Resource_Type,\n    ResourceName,\n    Namespace\n| summarize\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated),\n    ImpersonationCount = count(),\n    ResourcesAccessed = make_set(strcat(Resource_Type, \"/\", ResourceName), 20),\n    Verbs = make_set(Verb, 10)\n    by ClusterName, ActualUsername, ImpersonatedUsername, SourceIP",
+        "queryFrequency": "PT5M",
+        "queryPeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT30M",
+        "suppressionEnabled": false,
+        "tactics": ["PrivilegeEscalation", "DefenseEvasion"],
+        "techniques": ["T1078", "T1134"],
+        "alertRuleTemplateName": null,
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": true,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Account", "IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": ["ClusterName", "ActualUsername"]
+          }
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "SA Impersonation: {{ActualUsername}} -> {{ImpersonatedUsername}}",
+          "alertDescriptionFormat": "User '{{ActualUsername}}' impersonated service account '{{ImpersonatedUsername}}' from IP {{SourceIP}}. This is a high-risk privilege escalation technique."
+        },
+        "customDetails": {
+          "ClusterName": "ClusterName",
+          "ActualUsername": "ActualUsername",
+          "ImpersonatedSA": "ImpersonatedUsername",
+          "SourceIP": "SourceIP",
+          "ImpersonationCount": "ImpersonationCount"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Host",
+            "fieldMappings": [
+              {
+                "identifier": "HostName",
+                "columnName": "ClusterName"
+              }
+            ]
+          },
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "ActualUsername"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "SourceIP"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

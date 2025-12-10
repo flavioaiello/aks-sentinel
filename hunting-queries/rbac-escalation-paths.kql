@@ -1,0 +1,88 @@
+// AKS RBAC Privilege Escalation Paths
+// Description: Identifies potential RBAC privilege escalation paths and risky role bindings
+// Tactic: PrivilegeEscalation
+// Technique: T1078 - Valid Accounts
+
+let LookbackPeriod = 7d;
+let HighRiskVerbs = dynamic(["*", "create", "update", "patch", "delete", "escalate", "impersonate"]);
+let HighRiskResources = dynamic(["*", "secrets", "pods", "pods/exec", "serviceaccounts", "clusterroles", "clusterrolebindings", "roles", "rolebindings"]);
+
+// Analyze ClusterRoles
+let ClusterRoles = AzureDiagnostics
+| where Category == "kube-audit"
+| where TimeGenerated > ago(LookbackPeriod)
+| extend log = parse_json(log_s)
+| extend verb = tostring(log.verb)
+| extend objectRef = log.objectRef
+| extend requestObject = log.requestObject
+| where objectRef.resource == "clusterroles"
+| where verb in ("create", "update", "patch")
+| extend
+    RoleName = tostring(objectRef.name),
+    Rules = requestObject.rules
+| mv-expand rule = Rules
+| extend
+    APIGroups = tostring(rule.apiGroups),
+    Resources = rule.resources,
+    Verbs = rule.verbs
+| mv-expand resource = Resources
+| mv-expand v = Verbs
+| extend
+    Resource_str = tostring(resource),
+    Verb = tostring(v)
+| where Resource_str has_any (HighRiskResources) or Verb has_any (HighRiskVerbs)
+| extend RiskScore = (
+    toint(Resource_str == "*") * 10 +
+    toint(Verb == "*") * 10 +
+    toint(Resource_str in ("secrets", "pods/exec")) * 8 +
+    toint(Verb in ("impersonate", "escalate")) * 9 +
+    toint(Resource_str in ("clusterroles", "clusterrolebindings")) * 7
+)
+| project TimeGenerated, RoleName, Resource_str, Verb, APIGroups, RiskScore
+| summarize 
+    TotalRiskScore = sum(RiskScore),
+    HighRiskPermissions = make_set(strcat(Resource_str, ":", Verb), 20)
+    by RoleName
+| sort by TotalRiskScore desc;
+
+// Analyze ClusterRoleBindings
+let RoleBindings = AzureDiagnostics
+| where Category == "kube-audit"
+| where TimeGenerated > ago(LookbackPeriod)
+| extend log = parse_json(log_s)
+| extend verb = tostring(log.verb)
+| extend objectRef = log.objectRef
+| extend requestObject = log.requestObject
+| extend user = log.user
+| where objectRef.resource in ("clusterrolebindings", "rolebindings")
+| where verb in ("create", "update", "patch")
+| extend
+    BindingName = tostring(objectRef.name),
+    Namespace = tostring(objectRef.namespace),
+    RoleRef = tostring(requestObject.roleRef.name),
+    RoleKind = tostring(requestObject.roleRef.kind),
+    Subjects = requestObject.subjects,
+    CreatedBy = tostring(user.username)
+| mv-expand subject = Subjects
+| extend
+    SubjectKind = tostring(subject.kind),
+    SubjectName = tostring(subject.name),
+    SubjectNamespace = tostring(subject.namespace)
+| project TimeGenerated, BindingName, Namespace, RoleRef, RoleKind, SubjectKind, SubjectName, SubjectNamespace, CreatedBy;
+
+// Combine for analysis
+ClusterRoles
+| join kind=leftouter (
+    RoleBindings
+    | where RoleKind == "ClusterRole"
+) on $left.RoleName == $right.RoleRef
+| project
+    RoleName,
+    TotalRiskScore,
+    HighRiskPermissions,
+    BindingName,
+    BoundTo = strcat(SubjectKind, ": ", SubjectName),
+    SubjectNamespace,
+    CreatedBy
+| where isnotempty(BindingName)
+| sort by TotalRiskScore desc

@@ -1,0 +1,97 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "AKS Privileged Container Execution",
+    "description": "Detects the creation of privileged containers in AKS clusters, which can be used for container escape attacks.",
+    "severity": "High",
+    "requiredDataConnectors": [
+      {
+        "connectorId": "AzureKubernetesService",
+        "dataTypes": ["AzureDiagnostics"]
+      }
+    ],
+    "tactics": ["PrivilegeEscalation", "Execution"],
+    "techniques": ["T1611"],
+    "version": "1.0.0"
+  },
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Log Analytics workspace name"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2025-09-01",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/aks-privileged-container')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "AKS Privileged Container Execution",
+        "description": "Detects when a privileged container is created in an AKS cluster. Privileged containers have full access to the host and can be used for container escape attacks.",
+        "severity": "High",
+        "enabled": true,
+        "query": "AzureDiagnostics\n| where Category == \"kube-audit\"\n| where TimeGenerated > ago(5m)\n| extend requestObject = parse_json(tostring(parse_json(log_s).requestObject))\n| extend responseObject = parse_json(tostring(parse_json(log_s).responseObject))\n| extend verb = tostring(parse_json(log_s).verb)\n| extend objectRef = parse_json(tostring(parse_json(log_s).objectRef))\n| extend user = parse_json(tostring(parse_json(log_s).user))\n| where verb in (\"create\", \"update\", \"patch\")\n| where objectRef.resource == \"pods\"\n| extend containers = requestObject.spec.containers\n| mv-expand container = containers\n| extend securityContext = container.securityContext\n| where securityContext.privileged == true\n| extend\n    PodName = tostring(objectRef.name),\n    Namespace = tostring(objectRef.namespace),\n    ContainerName = tostring(container.name),\n    ContainerImage = tostring(container.image),\n    Username = tostring(user.username),\n    UserGroups = tostring(user.groups),\n    ClusterName = Resource\n| where Namespace !in (\"kube-system\", \"gatekeeper-system\", \"azure-arc\")\n| project\n    TimeGenerated,\n    ClusterName,\n    Namespace,\n    PodName,\n    ContainerName,\n    ContainerImage,\n    Username,\n    UserGroups,\n    verb\n| summarize\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated),\n    Count = count()\n    by ClusterName, Namespace, PodName, ContainerName, ContainerImage, Username",
+        "queryFrequency": "PT5M",
+        "queryPeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": ["PrivilegeEscalation", "Execution"],
+        "techniques": ["T1611"],
+        "alertRuleTemplateName": null,
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Host"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": ["ClusterName", "Namespace"]
+          }
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Privileged Container in AKS: {{PodName}} on {{ClusterName}}",
+          "alertDescriptionFormat": "A privileged container '{{ContainerName}}' was created in namespace '{{Namespace}}' by user '{{Username}}'. Privileged containers can escape to the host system."
+        },
+        "customDetails": {
+          "ClusterName": "ClusterName",
+          "Namespace": "Namespace",
+          "PodName": "PodName",
+          "ContainerName": "ContainerName",
+          "ContainerImage": "ContainerImage",
+          "Username": "Username"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Host",
+            "fieldMappings": [
+              {
+                "identifier": "HostName",
+                "columnName": "ClusterName"
+              }
+            ]
+          },
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "Username"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

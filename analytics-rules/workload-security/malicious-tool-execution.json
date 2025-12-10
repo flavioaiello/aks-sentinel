@@ -1,0 +1,86 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "AKS Malicious Tool Execution (Miners, Scanners)",
+    "description": "Detects execution of known malicious tools and crypto miners based on their specific CLI output and banners in container logs.",
+    "severity": "High",
+    "requiredDataConnectors": [
+      {
+        "connectorId": "ContainerInsights",
+        "dataTypes": ["ContainerLog"]
+      }
+    ],
+    "tactics": ["Execution", "Discovery", "Impact"],
+    "techniques": ["T1059", "T1046", "T1496"],
+    "version": "1.0.0"
+  },
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Log Analytics workspace name"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2025-09-01",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/aks-malicious-tool-execution')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "AKS Malicious Tool Execution (Miners, Scanners)",
+        "description": "Detects execution of known malicious tools and crypto miners based on their specific CLI output and banners in container logs.",
+        "severity": "High",
+        "enabled": true,
+        "query": "let ToolBanners = dynamic([\n    \"Starting Nmap\",\n    \"Masscan: outputting results\",\n    \"sqlmap identified the following injection point\",\n    \"Hydra (https://github.com/vanhauser-thc/thc-hydra)\",\n    \"XMRig\",\n    \"accepted share\",\n    \"stratum+tcp\",\n    \"wallet address\",\n    \"minerd\",\n    \"xmrig-proxy\",\n    \"linPEAS\",\n    \"winPEAS\",\n    \"LinEnum\"\n]);\nContainerLog\n| where TimeGenerated > ago(5m)\n| where LogEntry has_any (ToolBanners)\n| extend\n    ContainerId = ContainerID,\n    LogMessage = LogEntry,\n    PodName = extract(\"pod=([^,]+)\", 1, tostring(parse_json(LogEntrySource))),\n    Namespace = extract(\"namespace=([^,]+)\", 1, tostring(parse_json(LogEntrySource)))\n| join kind=leftouter (\n    KubePodInventory\n    | where TimeGenerated > ago(1h)\n    | distinct ContainerID, PodName = Name, Namespace, ClusterName, ContainerName\n) on $left.ContainerId == $right.ContainerID\n| project\n    TimeGenerated,\n    ClusterName,\n    Namespace,\n    PodName,\n    ContainerName,\n    ContainerId,\n    LogMessage\n| summarize\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated),\n    Count = count()\n    by ClusterName, Namespace, PodName, ContainerName, LogMessage",
+        "queryFrequency": "PT5M",
+        "queryPeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT30M",
+        "suppressionEnabled": false,
+        "tactics": ["Execution", "Discovery", "Impact"],
+        "techniques": ["T1059", "T1046", "T1496"],
+        "alertRuleTemplateName": null,
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Host"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": ["ClusterName", "PodName"]
+          }
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Malicious Tool Execution in {{PodName}}",
+          "alertDescriptionFormat": "Execution of malicious tool or miner detected in container '{{ContainerName}}' in pod '{{PodName}}'. Log: {{LogMessage}}"
+        },
+        "customDetails": {
+          "ClusterName": "ClusterName",
+          "Namespace": "Namespace",
+          "PodName": "PodName",
+          "ContainerName": "ContainerName"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Host",
+            "fieldMappings": [
+              {
+                "identifier": "HostName",
+                "columnName": "ClusterName"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

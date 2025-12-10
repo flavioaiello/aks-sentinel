@@ -1,0 +1,100 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "AKS Egress to Suspicious IP",
+    "description": "Detects outbound connections to known malicious or suspicious IP addresses.",
+    "severity": "High",
+    "requiredDataConnectors": [
+      {
+        "connectorId": "AzureKubernetesService",
+        "dataTypes": ["AzureDiagnostics"]
+      },
+      {
+        "connectorId": "ThreatIntelligence",
+        "dataTypes": ["ThreatIntelligenceIndicator"]
+      }
+    ],
+    "tactics": ["CommandAndControl", "Exfiltration"],
+    "techniques": ["T1071", "T1041"],
+    "version": "1.0.0"
+  },
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Log Analytics workspace name"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2025-09-01",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/aks-suspicious-egress')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "AKS Egress to Threat Intelligence IP",
+        "description": "Detects outbound network connections from AKS pods to IP addresses in threat intelligence feeds.",
+        "severity": "High",
+        "enabled": true,
+        "query": "let TIIndicators = ThreatIntelligenceIndicator\n| where TimeGenerated > ago(14d)\n| where isnotempty(NetworkIP) or isnotempty(NetworkDestinationIP)\n| extend TI_IP = coalesce(NetworkIP, NetworkDestinationIP)\n| where Active == true\n| summarize LatestIndicator = arg_max(TimeGenerated, *) by TI_IP\n| project TI_IP, Description, ThreatType, ConfidenceScore, ExpirationDateTime;\nAzureNetworkAnalytics_CL\n| where TimeGenerated > ago(5m)\n| where SubType_s == \"FlowLog\"\n| where FlowDirection_s == \"O\" // Outbound\n| extend\n    SourceIP = SrcIP_s,\n    DestinationIP = DestIP_s,\n    DestinationPort = DestPort_d,\n    Protocol = L4Protocol_s,\n    BytesSent = OutboundBytes_d,\n    FlowStatus = FlowStatus_s\n| where isnotempty(DestinationIP)\n| join kind=inner (TIIndicators) on $left.DestinationIP == $right.TI_IP\n| extend\n    ClusterName = Resource,\n    ThreatDescription = Description,\n    ThreatConfidence = ConfidenceScore\n| project\n    TimeGenerated,\n    ClusterName,\n    SourceIP,\n    DestinationIP,\n    DestinationPort,\n    Protocol,\n    BytesSent,\n    ThreatType,\n    ThreatDescription,\n    ThreatConfidence\n| summarize\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated),\n    ConnectionCount = count(),\n    TotalBytesSent = sum(BytesSent),\n    Ports = make_set(DestinationPort, 20)\n    by ClusterName, SourceIP, DestinationIP, ThreatType, ThreatDescription",
+        "queryFrequency": "PT5M",
+        "queryPeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT30M",
+        "suppressionEnabled": false,
+        "tactics": ["CommandAndControl", "Exfiltration"],
+        "techniques": ["T1071", "T1041"],
+        "alertRuleTemplateName": null,
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": true,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": ["ClusterName", "DestinationIP"]
+          }
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "AKS Egress to Malicious IP: {{DestinationIP}}",
+          "alertDescriptionFormat": "Detected {{ConnectionCount}} connections from {{SourceIP}} to known malicious IP {{DestinationIP}} ({{ThreatType}}). {{TotalBytesSent}} bytes transferred."
+        },
+        "customDetails": {
+          "ClusterName": "ClusterName",
+          "SourceIP": "SourceIP",
+          "DestinationIP": "DestinationIP",
+          "ThreatType": "ThreatType",
+          "TotalBytes": "TotalBytesSent"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Host",
+            "fieldMappings": [
+              {
+                "identifier": "HostName",
+                "columnName": "ClusterName"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "DestinationIP"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

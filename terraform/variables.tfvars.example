@@ -1,0 +1,41 @@
+# Example variables file - copy to terraform.tfvars and customize
+
+resource_group_name          = "rg-sentinel"
+log_analytics_workspace_name = "law-sentinel"
+
+# Customize allowed namespaces (excluded from detections)
+allowed_namespaces = [
+  "kube-system",
+  "gatekeeper-system", 
+  "azure-arc",
+  "calico-system",
+  "tigera-operator",
+  "cert-manager",
+  "ingress-nginx"
+]
+
+# Customize allowed service accounts
+allowed_service_accounts = [
+  "system:kube-controller-manager",
+  "system:kube-scheduler",
+  "system:serviceaccount:kube-system:replicaset-controller"
+]
+
+# Customize trusted container registries
+trusted_registries = [
+  ".azurecr.io",
+  "mcr.microsoft.com",
+  "gcr.io/gke-release"
+]
+
+# Detection thresholds
+brute_force_threshold      = 10
+log_access_threshold       = 50
+data_transfer_threshold_mb = 500
+
+# Tags
+tags = {
+  ManagedBy   = "Terraform"
+  Purpose     = "AKS Security Detections"
+  Environment = "Production"
+}

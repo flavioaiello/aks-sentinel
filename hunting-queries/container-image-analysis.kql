@@ -1,0 +1,76 @@
+// AKS Container Image Analysis
+// Description: Analyzes container images to identify anomalies and potential supply chain attacks
+// Tactic: InitialAccess, Execution
+// Technique: T1204 - User Execution
+
+let LookbackPeriod = 7d;
+let TrustedRegistries = dynamic([".azurecr.io", "mcr.microsoft.com", "gcr.io/gke-release", "docker.io/library"]);
+let SuspiciousTags = dynamic(["latest", "dev", "test", "debug", "staging"]);
+
+// Analyze images from audit logs
+let ImageDeployments = AzureDiagnostics
+| where Category == "kube-audit"
+| where TimeGenerated > ago(LookbackPeriod)
+| extend log = parse_json(log_s)
+| extend verb = tostring(log.verb)
+| extend objectRef = log.objectRef
+| extend requestObject = log.requestObject
+| extend user = log.user
+| where verb == "create"
+| where objectRef.resource == "pods"
+| extend containers = requestObject.spec.containers
+| mv-expand container = containers
+| extend
+    PodName = tostring(objectRef.name),
+    Namespace = tostring(objectRef.namespace),
+    ContainerName = tostring(container.name),
+    ContainerImage = tostring(container.image),
+    ImagePullPolicy = tostring(container.imagePullPolicy),
+    Username = tostring(user.username),
+    ClusterName = Resource
+| project TimeGenerated, ClusterName, Namespace, PodName, ContainerName, ContainerImage, ImagePullPolicy, Username;
+
+// Parse and analyze images
+ImageDeployments
+| extend
+    ImageRegistry = extract(@"^([^/]+)", 1, ContainerImage),
+    ImageName = extract(@"[^/]+/([^:@]+)", 1, ContainerImage),
+    ImageTag = coalesce(extract(@":([^@]+)$", 1, ContainerImage), "latest"),
+    ImageDigest = extract(@"@(.+)$", 1, ContainerImage)
+| extend
+    IsTrustedRegistry = ContainerImage has_any (TrustedRegistries),
+    IsSuspiciousTag = ImageTag in (SuspiciousTags),
+    HasDigest = isnotempty(ImageDigest),
+    IsDockerHub = ImageRegistry !contains "." and not(ContainerImage contains "/")
+| extend RiskFactors = pack_array(
+    iff(not(IsTrustedRegistry), "Untrusted Registry", ""),
+    iff(IsSuspiciousTag, "Suspicious Tag", ""),
+    iff(not(HasDigest) and ImagePullPolicy != "IfNotPresent", "No Digest", ""),
+    iff(IsDockerHub, "Docker Hub", "")
+)
+| extend RiskFactors = set_difference(RiskFactors, dynamic([""]))
+| extend RiskScore = array_length(RiskFactors)
+| summarize
+    DeploymentCount = count(),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated),
+    Namespaces = make_set(Namespace, 20),
+    DeployedBy = make_set(Username, 10),
+    Pods = make_set(PodName, 20)
+    by ClusterName, ContainerImage, ImageRegistry, ImageTag, IsTrustedRegistry, IsSuspiciousTag, HasDigest, RiskScore
+| where RiskScore > 0
+| project
+    ClusterName,
+    ContainerImage,
+    ImageRegistry,
+    ImageTag,
+    DeploymentCount,
+    IsTrustedRegistry,
+    IsSuspiciousTag,
+    HasDigest,
+    RiskScore,
+    Namespaces,
+    DeployedBy,
+    FirstSeen,
+    LastSeen
+| sort by RiskScore desc, DeploymentCount desc

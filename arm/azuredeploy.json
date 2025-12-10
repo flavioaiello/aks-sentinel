@@ -1,0 +1,321 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "AKS Security Detections for Microsoft Sentinel",
+    "description": "Deploys a comprehensive set of security detection rules for Azure Kubernetes Service.",
+    "version": "1.0.0"
+  },
+  "parameters": {
+    "workspaceName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the Log Analytics workspace with Sentinel enabled"
+      }
+    },
+    "workspaceResourceGroup": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().name]",
+      "metadata": {
+        "description": "Resource group of the Log Analytics workspace"
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Location for all resources"
+      }
+    }
+  },
+  "variables": {
+    "workspaceId": "[resourceId(parameters('workspaceResourceGroup'), 'Microsoft.OperationalInsights/workspaces', parameters('workspaceName'))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2025-09-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/aks-privileged-container')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "AKS Privileged Container Execution",
+        "description": "Detects the creation of privileged containers in AKS clusters, which can be used for container escape attacks.",
+        "severity": "High",
+        "enabled": true,
+        "query": "AzureDiagnostics\n| where Category == \"kube-audit\"\n| where TimeGenerated > ago(5m)\n| extend requestObject = parse_json(tostring(parse_json(log_s).requestObject))\n| extend verb = tostring(parse_json(log_s).verb)\n| extend objectRef = parse_json(tostring(parse_json(log_s).objectRef))\n| extend user = parse_json(tostring(parse_json(log_s).user))\n| where verb in (\"create\", \"update\", \"patch\")\n| where objectRef.resource == \"pods\"\n| extend containers = requestObject.spec.containers\n| mv-expand container = containers\n| extend securityContext = container.securityContext\n| where securityContext.privileged == true\n| extend PodName = tostring(objectRef.name), Namespace = tostring(objectRef.namespace), ContainerName = tostring(container.name), ContainerImage = tostring(container.image), Username = tostring(user.username), ClusterName = Resource\n| where Namespace !in (\"kube-system\", \"gatekeeper-system\", \"azure-arc\")\n| project TimeGenerated, ClusterName, Namespace, PodName, ContainerName, ContainerImage, Username\n| summarize FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated), Count = count() by ClusterName, Namespace, PodName, ContainerName, ContainerImage, Username",
+        "queryFrequency": "PT5M",
+        "queryPeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": ["PrivilegeEscalation", "Execution"],
+        "techniques": ["T1611"],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Host"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "customDetails": {
+          "ClusterName": "ClusterName",
+          "Namespace": "Namespace",
+          "PodName": "PodName",
+          "ContainerName": "ContainerName",
+          "Username": "Username"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Host",
+            "fieldMappings": [{"identifier": "HostName", "columnName": "ClusterName"}]
+          },
+          {
+            "entityType": "Account",
+            "fieldMappings": [{"identifier": "Name", "columnName": "Username"}]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2025-09-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/aks-anonymous-access')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "AKS Anonymous API Access Detected",
+        "description": "Detects when the Kubernetes API is accessed using anonymous authentication.",
+        "severity": "Critical",
+        "enabled": true,
+        "query": "AzureDiagnostics\n| where Category == \"kube-audit\"\n| where TimeGenerated > ago(5m)\n| extend log = parse_json(log_s)\n| extend user = log.user\n| extend sourceIPs = log.sourceIPs\n| extend responseStatus = log.responseStatus\n| extend objectRef = log.objectRef\n| where user.username == \"system:anonymous\"\n| where responseStatus.code in (200, 201, 202, 204)\n| extend Resource_Type = tostring(objectRef.resource), SourceIP = tostring(sourceIPs[0]), ClusterName = Resource\n| project TimeGenerated, ClusterName, Resource_Type, SourceIP\n| summarize FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated), RequestCount = count(), Resources = make_set(Resource_Type, 20) by ClusterName, SourceIP",
+        "queryFrequency": "PT5M",
+        "queryPeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT30M",
+        "suppressionEnabled": false,
+        "tactics": ["InitialAccess", "Discovery"],
+        "techniques": ["T1190", "T1613"],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "customDetails": {
+          "ClusterName": "ClusterName",
+          "SourceIP": "SourceIP",
+          "RequestCount": "RequestCount"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Host",
+            "fieldMappings": [{"identifier": "HostName", "columnName": "ClusterName"}]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [{"identifier": "Address", "columnName": "SourceIP"}]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2025-09-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/aks-secrets-access')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "AKS Kubernetes Secrets Access",
+        "description": "Detects when Kubernetes secrets are accessed by non-system users.",
+        "severity": "High",
+        "enabled": true,
+        "query": "let AllowedSecretAccessors = dynamic([\"system:kube-controller-manager\", \"system:kube-scheduler\"]);\nAzureDiagnostics\n| where Category == \"kube-audit\"\n| where TimeGenerated > ago(5m)\n| extend log = parse_json(log_s)\n| extend verb = tostring(log.verb)\n| extend objectRef = log.objectRef\n| extend user = log.user\n| extend sourceIPs = log.sourceIPs\n| extend responseStatus = log.responseStatus\n| where objectRef.resource == \"secrets\"\n| where verb in (\"get\", \"list\", \"watch\")\n| where responseStatus.code == 200 or responseStatus.code == 201\n| extend SecretName = tostring(objectRef.name), Namespace = tostring(objectRef.namespace), Username = tostring(user.username), SourceIP = tostring(sourceIPs[0]), ClusterName = Resource\n| where not(Username has_any (AllowedSecretAccessors))\n| where not(Username startswith \"system:serviceaccount:kube-system:\")\n| project TimeGenerated, ClusterName, Namespace, SecretName, Username, SourceIP\n| summarize FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated), AccessCount = count(), SecretsAccessed = make_set(SecretName, 20) by ClusterName, Username, SourceIP",
+        "queryFrequency": "PT5M",
+        "queryPeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT30M",
+        "suppressionEnabled": false,
+        "tactics": ["CredentialAccess"],
+        "techniques": ["T1552.007"],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Account", "IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "customDetails": {
+          "ClusterName": "ClusterName",
+          "Username": "Username",
+          "SourceIP": "SourceIP",
+          "AccessCount": "AccessCount"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Host",
+            "fieldMappings": [{"identifier": "HostName", "columnName": "ClusterName"}]
+          },
+          {
+            "entityType": "Account",
+            "fieldMappings": [{"identifier": "Name", "columnName": "Username"}]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [{"identifier": "Address", "columnName": "SourceIP"}]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2025-09-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/aks-exec-into-pod')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "AKS Kubectl Exec into Pod",
+        "description": "Detects when kubectl exec is used to execute commands in a running container.",
+        "severity": "Medium",
+        "enabled": true,
+        "query": "AzureDiagnostics\n| where Category == \"kube-audit\"\n| where TimeGenerated > ago(5m)\n| extend log = parse_json(log_s)\n| extend verb = tostring(log.verb)\n| extend objectRef = log.objectRef\n| extend user = log.user\n| extend sourceIPs = log.sourceIPs\n| where objectRef.resource == \"pods\" and objectRef.subresource == \"exec\"\n| where verb == \"create\"\n| extend PodName = tostring(objectRef.name), Namespace = tostring(objectRef.namespace), Username = tostring(user.username), SourceIP = tostring(sourceIPs[0]), ClusterName = Resource\n| where not(Username startswith \"system:\")\n| where Namespace !in (\"kube-system\", \"gatekeeper-system\", \"azure-arc\")\n| project TimeGenerated, ClusterName, Namespace, PodName, Username, SourceIP\n| summarize FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated), ExecCount = count(), PodsTargeted = make_set(PodName, 20) by ClusterName, Username, SourceIP",
+        "queryFrequency": "PT5M",
+        "queryPeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT30M",
+        "suppressionEnabled": false,
+        "tactics": ["Execution"],
+        "techniques": ["T1609"],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Account", "IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "customDetails": {
+          "ClusterName": "ClusterName",
+          "Username": "Username",
+          "SourceIP": "SourceIP",
+          "ExecCount": "ExecCount"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Host",
+            "fieldMappings": [{"identifier": "HostName", "columnName": "ClusterName"}]
+          },
+          {
+            "entityType": "Account",
+            "fieldMappings": [{"identifier": "Name", "columnName": "Username"}]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [{"identifier": "Address", "columnName": "SourceIP"}]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2025-09-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/aks-cluster-role-creation')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "AKS ClusterRole or ClusterRoleBinding Created",
+        "description": "Detects when cluster-wide RBAC roles or bindings are created.",
+        "severity": "High",
+        "enabled": true,
+        "query": "AzureDiagnostics\n| where Category == \"kube-audit\"\n| where TimeGenerated > ago(5m)\n| extend log = parse_json(log_s)\n| extend verb = tostring(log.verb)\n| extend objectRef = log.objectRef\n| extend requestObject = log.requestObject\n| extend user = log.user\n| extend responseStatus = log.responseStatus\n| where objectRef.resource in (\"clusterroles\", \"clusterrolebindings\")\n| where verb == \"create\"\n| where responseStatus.code in (200, 201)\n| extend ResourceName = tostring(objectRef.name), ResourceType = tostring(objectRef.resource), Username = tostring(user.username), ClusterName = Resource\n| extend Rules = tostring(requestObject.rules)\n| where not(Username startswith \"system:\")\n| project TimeGenerated, ClusterName, ResourceType, ResourceName, Username, Rules\n| summarize FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated), Count = count() by ClusterName, ResourceType, ResourceName, Username, Rules",
+        "queryFrequency": "PT5M",
+        "queryPeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": ["PrivilegeEscalation", "Persistence"],
+        "techniques": ["T1078", "T1098"],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "customDetails": {
+          "ClusterName": "ClusterName",
+          "ResourceType": "ResourceType",
+          "ResourceName": "ResourceName",
+          "Username": "Username"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Host",
+            "fieldMappings": [{"identifier": "HostName", "columnName": "ClusterName"}]
+          },
+          {
+            "entityType": "Account",
+            "fieldMappings": [{"identifier": "Name", "columnName": "Username"}]
+          }
+        ]
+      }
+    }
+  ],
+  "outputs": {
+    "deployedRules": {
+      "type": "array",
+      "value": [
+        "aks-privileged-container",
+        "aks-anonymous-access",
+        "aks-secrets-access",
+        "aks-exec-into-pod",
+        "aks-cluster-role-creation"
+      ]
+    }
+  }
+}

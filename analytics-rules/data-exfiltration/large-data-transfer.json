@@ -1,0 +1,86 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "AKS Large Data Transfer from Container",
+    "description": "Detects unusually large outbound data transfers from containers.",
+    "severity": "High",
+    "requiredDataConnectors": [
+      {
+        "connectorId": "AzureNetworkWatcher",
+        "dataTypes": ["AzureNetworkAnalytics_CL"]
+      }
+    ],
+    "tactics": ["Exfiltration"],
+    "techniques": ["T1041"],
+    "version": "1.0.0"
+  },
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Log Analytics workspace name"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2025-09-01",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/aks-large-transfer')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "AKS Large Outbound Data Transfer",
+        "description": "Detects unusually large outbound data transfers from AKS pods which may indicate data exfiltration.",
+        "severity": "High",
+        "enabled": true,
+        "query": "let DataTransferThresholdMB = 500;\nlet TimeWindow = 15m;\n// Use NSG Flow Logs if available\nAzureNetworkAnalytics_CL\n| where TimeGenerated > ago(TimeWindow)\n| where SubType_s == \"FlowLog\"\n| where FlowDirection_s == \"O\" // Outbound\n| extend\n    SourceIP = SrcIP_s,\n    DestinationIP = DestIP_s,\n    DestinationPort = DestPort_d,\n    BytesSent = OutboundBytes_d,\n    BytesReceived = InboundBytes_d,\n    Protocol = L4Protocol_s\n| where BytesSent > 0\n| summarize\n    TotalBytesSent = sum(BytesSent),\n    TotalBytesReceived = sum(BytesReceived),\n    FlowCount = count(),\n    UniqueDestinations = dcount(DestinationIP),\n    Destinations = make_set(DestinationIP, 20),\n    Ports = make_set(DestinationPort, 20)\n    by SourceIP, bin(TimeGenerated, TimeWindow)\n| extend TotalMBSent = TotalBytesSent / (1024 * 1024)\n| where TotalMBSent >= DataTransferThresholdMB\n| extend\n    ClusterName = \"AKS\" // Would need to be enriched with actual cluster info\n| project\n    TimeGenerated,\n    ClusterName,\n    SourceIP,\n    TotalMBSent,\n    TotalBytesSent,\n    FlowCount,\n    UniqueDestinations,\n    Destinations,\n    Ports",
+        "queryFrequency": "PT15M",
+        "queryPeriod": "PT15M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": ["Exfiltration"],
+        "techniques": ["T1041"],
+        "alertRuleTemplateName": null,
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": true,
+            "lookbackDuration": "PT2H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": ["SourceIP"]
+          }
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Large Data Transfer from {{SourceIP}} ({{TotalMBSent}} MB)",
+          "alertDescriptionFormat": "Detected {{TotalMBSent}} MB outbound transfer from {{SourceIP}} to {{UniqueDestinations}} unique destinations. This may indicate data exfiltration."
+        },
+        "customDetails": {
+          "SourceIP": "SourceIP",
+          "TotalMBSent": "TotalMBSent",
+          "UniqueDestinations": "UniqueDestinations",
+          "FlowCount": "FlowCount"
+        },
+        "entityMappings": [
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "SourceIP"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

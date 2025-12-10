@@ -1,0 +1,104 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "AKS Exec into Pod",
+    "description": "Detects kubectl exec commands into pods which may indicate post-compromise activity.",
+    "severity": "Medium",
+    "requiredDataConnectors": [
+      {
+        "connectorId": "AzureKubernetesService",
+        "dataTypes": ["AzureDiagnostics"]
+      }
+    ],
+    "tactics": ["Execution"],
+    "techniques": ["T1609"],
+    "version": "1.0.0"
+  },
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Log Analytics workspace name"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2025-09-01",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/aks-exec-into-pod')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "AKS Kubectl Exec into Pod",
+        "description": "Detects when kubectl exec is used to execute commands in a running container. This can indicate post-compromise lateral movement.",
+        "severity": "Medium",
+        "enabled": true,
+        "query": "AzureDiagnostics\n| where Category == \"kube-audit\"\n| where TimeGenerated > ago(5m)\n| extend log = parse_json(log_s)\n| extend verb = tostring(log.verb)\n| extend objectRef = log.objectRef\n| extend user = log.user\n| extend sourceIPs = log.sourceIPs\n| extend responseStatus = log.responseStatus\n| where objectRef.resource == \"pods\" and objectRef.subresource == \"exec\"\n| where verb == \"create\"\n| extend\n    PodName = tostring(objectRef.name),\n    Namespace = tostring(objectRef.namespace),\n    Username = tostring(user.username),\n    UserGroups = tostring(user.groups),\n    SourceIP = tostring(sourceIPs[0]),\n    StatusCode = tostring(responseStatus.code),\n    ClusterName = Resource\n| where not(Username startswith \"system:\")\n| where Namespace !in (\"kube-system\", \"gatekeeper-system\", \"azure-arc\")\n| project\n    TimeGenerated,\n    ClusterName,\n    Namespace,\n    PodName,\n    Username,\n    SourceIP,\n    StatusCode\n| summarize\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated),\n    ExecCount = count(),\n    PodsTargeted = make_set(PodName, 20),\n    Namespaces = make_set(Namespace, 10)\n    by ClusterName, Username, SourceIP",
+        "queryFrequency": "PT5M",
+        "queryPeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT30M",
+        "suppressionEnabled": false,
+        "tactics": ["Execution"],
+        "techniques": ["T1609"],
+        "alertRuleTemplateName": null,
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Account", "IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": ["ClusterName", "Username"]
+          }
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Kubectl Exec by {{Username}} from {{SourceIP}}",
+          "alertDescriptionFormat": "User '{{Username}}' executed {{ExecCount}} exec commands into pods from IP {{SourceIP}}."
+        },
+        "customDetails": {
+          "ClusterName": "ClusterName",
+          "Username": "Username",
+          "SourceIP": "SourceIP",
+          "ExecCount": "ExecCount"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Host",
+            "fieldMappings": [
+              {
+                "identifier": "HostName",
+                "columnName": "ClusterName"
+              }
+            ]
+          },
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "Username"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "SourceIP"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

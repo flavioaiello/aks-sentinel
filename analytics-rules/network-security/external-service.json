@@ -1,0 +1,96 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "AKS NodePort or LoadBalancer Service Created",
+    "description": "Detects creation of NodePort or LoadBalancer services which expose applications externally.",
+    "severity": "Medium",
+    "requiredDataConnectors": [
+      {
+        "connectorId": "AzureKubernetesService",
+        "dataTypes": ["AzureDiagnostics"]
+      }
+    ],
+    "tactics": ["Persistence", "CommandAndControl"],
+    "techniques": ["T1071"],
+    "version": "1.0.0"
+  },
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Log Analytics workspace name"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2025-09-01",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/aks-external-service')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "AKS External Service Exposure (NodePort/LoadBalancer)",
+        "description": "Detects when a NodePort or LoadBalancer type service is created, potentially exposing applications to the internet.",
+        "severity": "Medium",
+        "enabled": true,
+        "query": "AzureDiagnostics\n| where Category == \"kube-audit\"\n| where TimeGenerated > ago(5m)\n| extend log = parse_json(log_s)\n| extend verb = tostring(log.verb)\n| extend objectRef = log.objectRef\n| extend requestObject = log.requestObject\n| extend user = log.user\n| extend responseStatus = log.responseStatus\n| where objectRef.resource == \"services\"\n| where verb == \"create\"\n| where responseStatus.code in (200, 201)\n| extend\n    ServiceType = tostring(requestObject.spec.type),\n    ServiceName = tostring(objectRef.name),\n    Namespace = tostring(objectRef.namespace),\n    Ports = tostring(requestObject.spec.ports),\n    ExternalIPs = tostring(requestObject.spec.externalIPs),\n    LoadBalancerIP = tostring(requestObject.spec.loadBalancerIP),\n    Username = tostring(user.username),\n    ClusterName = Resource\n| where ServiceType in (\"NodePort\", \"LoadBalancer\")\n| where Namespace !in (\"kube-system\", \"gatekeeper-system\", \"azure-arc\", \"ingress-nginx\")\n| project\n    TimeGenerated,\n    ClusterName,\n    Namespace,\n    ServiceName,\n    ServiceType,\n    Ports,\n    ExternalIPs,\n    LoadBalancerIP,\n    Username\n| summarize\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated),\n    Count = count()\n    by ClusterName, Namespace, ServiceName, ServiceType, Ports, Username",
+        "queryFrequency": "PT5M",
+        "queryPeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": ["Persistence", "CommandAndControl"],
+        "techniques": ["T1071"],
+        "alertRuleTemplateName": null,
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": ["ClusterName", "ServiceType"]
+          }
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "External {{ServiceType}} Service: {{ServiceName}}",
+          "alertDescriptionFormat": "A {{ServiceType}} service '{{ServiceName}}' was created in namespace '{{Namespace}}' by '{{Username}}', potentially exposing the application externally."
+        },
+        "customDetails": {
+          "ClusterName": "ClusterName",
+          "Namespace": "Namespace",
+          "ServiceName": "ServiceName",
+          "ServiceType": "ServiceType",
+          "Ports": "Ports"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Host",
+            "fieldMappings": [
+              {
+                "identifier": "HostName",
+                "columnName": "ClusterName"
+              }
+            ]
+          },
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "Username"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

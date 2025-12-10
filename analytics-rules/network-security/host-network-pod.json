@@ -1,0 +1,96 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "AKS Pod with Host Network",
+    "description": "Detects pods configured with host network access.",
+    "severity": "High",
+    "requiredDataConnectors": [
+      {
+        "connectorId": "AzureKubernetesService",
+        "dataTypes": ["AzureDiagnostics"]
+      }
+    ],
+    "tactics": ["PrivilegeEscalation", "LateralMovement"],
+    "techniques": ["T1611"],
+    "version": "1.0.0"
+  },
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Log Analytics workspace name"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2025-09-01",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/aks-host-network')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "AKS Pod with Host Network Access",
+        "description": "Detects when a pod is created with hostNetwork: true, allowing direct access to the node's network namespace.",
+        "severity": "High",
+        "enabled": true,
+        "query": "AzureDiagnostics\n| where Category == \"kube-audit\"\n| where TimeGenerated > ago(5m)\n| extend log = parse_json(log_s)\n| extend verb = tostring(log.verb)\n| extend objectRef = log.objectRef\n| extend requestObject = log.requestObject\n| extend user = log.user\n| where verb in (\"create\", \"update\", \"patch\")\n| where objectRef.resource == \"pods\"\n| extend\n    HostNetwork = tobool(requestObject.spec.hostNetwork),\n    HostPID = tobool(requestObject.spec.hostPID),\n    HostIPC = tobool(requestObject.spec.hostIPC)\n| where HostNetwork == true or HostPID == true or HostIPC == true\n| extend\n    PodName = tostring(objectRef.name),\n    Namespace = tostring(objectRef.namespace),\n    Username = tostring(user.username),\n    ClusterName = Resource\n| where Namespace !in (\"kube-system\", \"gatekeeper-system\", \"azure-arc\", \"calico-system\", \"tigera-operator\")\n| project\n    TimeGenerated,\n    ClusterName,\n    Namespace,\n    PodName,\n    HostNetwork,\n    HostPID,\n    HostIPC,\n    Username\n| summarize\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated),\n    Count = count()\n    by ClusterName, Namespace, PodName, HostNetwork, HostPID, HostIPC, Username",
+        "queryFrequency": "PT5M",
+        "queryPeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": ["PrivilegeEscalation", "LateralMovement"],
+        "techniques": ["T1611"],
+        "alertRuleTemplateName": null,
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Host"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": ["ClusterName", "Namespace"]
+          }
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Host Namespace Access: {{PodName}}",
+          "alertDescriptionFormat": "Pod '{{PodName}}' in namespace '{{Namespace}}' has host namespace access (Network: {{HostNetwork}}, PID: {{HostPID}}, IPC: {{HostIPC}})."
+        },
+        "customDetails": {
+          "ClusterName": "ClusterName",
+          "Namespace": "Namespace",
+          "PodName": "PodName",
+          "HostNetwork": "HostNetwork",
+          "HostPID": "HostPID"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Host",
+            "fieldMappings": [
+              {
+                "identifier": "HostName",
+                "columnName": "ClusterName"
+              }
+            ]
+          },
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "Username"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,96 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "AKS Container with Host Path Volume Mount",
+    "description": "Detects containers mounting sensitive host paths which can be used for privilege escalation.",
+    "severity": "High",
+    "requiredDataConnectors": [
+      {
+        "connectorId": "AzureKubernetesService",
+        "dataTypes": ["AzureDiagnostics"]
+      }
+    ],
+    "tactics": ["PrivilegeEscalation", "Persistence"],
+    "techniques": ["T1611", "T1078"],
+    "version": "1.0.0"
+  },
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Log Analytics workspace name"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2025-09-01",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/aks-hostpath-mount')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "AKS Container with Sensitive Host Path Mount",
+        "description": "Detects when a container mounts sensitive host filesystem paths like /etc, /var/run/docker.sock, or /. This can be used for container escape or privilege escalation.",
+        "severity": "High",
+        "enabled": true,
+        "query": "let SensitivePaths = dynamic([\"/\", \"/etc\", \"/var/run/docker.sock\", \"/var/run/crio/crio.sock\", \"/var/lib/kubelet\", \"/var/lib/docker\", \"/proc\", \"/sys\", \"/root\", \"/home\"]);\nAzureDiagnostics\n| where Category == \"kube-audit\"\n| where TimeGenerated > ago(5m)\n| extend log = parse_json(log_s)\n| extend verb = tostring(log.verb)\n| extend objectRef = log.objectRef\n| extend requestObject = log.requestObject\n| extend user = log.user\n| where verb in (\"create\", \"update\", \"patch\")\n| where objectRef.resource == \"pods\"\n| extend volumes = requestObject.spec.volumes\n| mv-expand volume = volumes\n| extend hostPath = tostring(volume.hostPath.path)\n| where isnotempty(hostPath)\n| where hostPath in (SensitivePaths) or hostPath startswith \"/etc\" or hostPath startswith \"/var/run\"\n| extend\n    PodName = tostring(objectRef.name),\n    Namespace = tostring(objectRef.namespace),\n    VolumeName = tostring(volume.name),\n    HostPath = hostPath,\n    Username = tostring(user.username),\n    ClusterName = Resource\n| where Namespace !in (\"kube-system\", \"gatekeeper-system\", \"azure-arc\", \"calico-system\")\n| project\n    TimeGenerated,\n    ClusterName,\n    Namespace,\n    PodName,\n    VolumeName,\n    HostPath,\n    Username\n| summarize\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated),\n    Count = count()\n    by ClusterName, Namespace, PodName, VolumeName, HostPath, Username",
+        "queryFrequency": "PT5M",
+        "queryPeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": ["PrivilegeEscalation", "Persistence"],
+        "techniques": ["T1611", "T1078"],
+        "alertRuleTemplateName": null,
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Host"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": ["ClusterName", "Namespace", "HostPath"]
+          }
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Sensitive Host Path Mount: {{HostPath}} in {{PodName}}",
+          "alertDescriptionFormat": "Pod '{{PodName}}' in namespace '{{Namespace}}' mounted sensitive host path '{{HostPath}}'. This can be used for container escape."
+        },
+        "customDetails": {
+          "ClusterName": "ClusterName",
+          "Namespace": "Namespace",
+          "PodName": "PodName",
+          "HostPath": "HostPath",
+          "Username": "Username"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Host",
+            "fieldMappings": [
+              {
+                "identifier": "HostName",
+                "columnName": "ClusterName"
+              }
+            ]
+          },
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "Username"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

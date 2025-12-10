@@ -1,0 +1,95 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "AKS API Server Brute Force",
+    "description": "Detects potential brute force attacks against the Kubernetes API server.",
+    "severity": "High",
+    "requiredDataConnectors": [
+      {
+        "connectorId": "AzureKubernetesService",
+        "dataTypes": ["AzureDiagnostics"]
+      }
+    ],
+    "tactics": ["CredentialAccess", "InitialAccess"],
+    "techniques": ["T1110"],
+    "version": "1.0.0"
+  },
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Log Analytics workspace name"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2025-09-01",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/aks-api-brute-force')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "AKS API Server Authentication Failures (Brute Force)",
+        "description": "Detects multiple authentication failures against the Kubernetes API server from the same source, indicating potential brute force attempts.",
+        "severity": "High",
+        "enabled": true,
+        "query": "let FailureThreshold = 10;\nlet TimeWindow = 5m;\nAzureDiagnostics\n| where Category == \"kube-audit\"\n| where TimeGenerated > ago(TimeWindow)\n| extend log = parse_json(log_s)\n| extend responseStatus = log.responseStatus\n| extend sourceIPs = log.sourceIPs\n| extend user = log.user\n| where responseStatus.code in (401, 403)\n| extend\n    SourceIP = tostring(sourceIPs[0]),\n    Username = tostring(user.username),\n    StatusCode = toint(responseStatus.code),\n    StatusMessage = tostring(responseStatus.message),\n    ClusterName = Resource\n| summarize\n    FailureCount = count(),\n    FirstFailure = min(TimeGenerated),\n    LastFailure = max(TimeGenerated),\n    UsernamesAttempted = make_set(Username, 50),\n    StatusCodes = make_set(StatusCode, 10),\n    StatusMessages = make_set(StatusMessage, 10)\n    by ClusterName, SourceIP, bin(TimeGenerated, TimeWindow)\n| where FailureCount >= FailureThreshold\n| extend UniqueUsers = array_length(UsernamesAttempted)\n| project\n    TimeGenerated,\n    ClusterName,\n    SourceIP,\n    FailureCount,\n    UniqueUsers,\n    UsernamesAttempted,\n    FirstFailure,\n    LastFailure",
+        "queryFrequency": "PT5M",
+        "queryPeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT30M",
+        "suppressionEnabled": false,
+        "tactics": ["CredentialAccess", "InitialAccess"],
+        "techniques": ["T1110"],
+        "alertRuleTemplateName": null,
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": ["ClusterName", "SourceIP"]
+          }
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "API Server Brute Force from {{SourceIP}}",
+          "alertDescriptionFormat": "Detected {{FailureCount}} authentication failures from {{SourceIP}} targeting {{UniqueUsers}} unique accounts."
+        },
+        "customDetails": {
+          "ClusterName": "ClusterName",
+          "SourceIP": "SourceIP",
+          "FailureCount": "FailureCount",
+          "UniqueUsers": "UniqueUsers"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Host",
+            "fieldMappings": [
+              {
+                "identifier": "HostName",
+                "columnName": "ClusterName"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "SourceIP"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

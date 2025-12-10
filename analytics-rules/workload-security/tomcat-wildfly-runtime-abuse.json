@@ -1,0 +1,86 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "AKS Tomcat & WildFly Runtime Abuse",
+    "description": "Detects suspicious runtime activities in Java application servers (Tomcat, WildFly, WebLogic) such as hot deployment of WAR files, undeployment, and access to management interfaces.",
+    "severity": "High",
+    "requiredDataConnectors": [
+      {
+        "connectorId": "ContainerInsights",
+        "dataTypes": ["ContainerLog"]
+      }
+    ],
+    "tactics": ["Persistence", "Defense Evasion"],
+    "techniques": ["T1505", "T1078"],
+    "version": "1.0.0"
+  },
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Log Analytics workspace name"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2025-09-01",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/aks-tomcat-wildfly-abuse')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "AKS Tomcat & WildFly Runtime Abuse",
+        "description": "Detects suspicious runtime activities in Java application servers (Tomcat, WildFly, WebLogic) such as hot deployment of WAR files, undeployment, and access to management interfaces.",
+        "severity": "High",
+        "enabled": true,
+        "query": "let AppServerPatterns = dynamic([\n    \"org.apache.catalina.startup.HostConfig.deployWAR\",\n    \"org.apache.catalina.manager.ManagerServlet\",\n    \"WFLYSRV0010: Deployed\",\n    \"WFLYCTL0013: Operation\",\n    \"weblogic.deploy\",\n    \"Deploying web application archive\",\n    \"undeploy\"\n]);\nContainerLog\n| where TimeGenerated > ago(5m)\n| where LogEntry has_any (AppServerPatterns)\n| extend\n    ContainerId = ContainerID,\n    LogMessage = LogEntry,\n    PodName = extract(\"pod=([^,]+)\", 1, tostring(parse_json(LogEntrySource))),\n    Namespace = extract(\"namespace=([^,]+)\", 1, tostring(parse_json(LogEntrySource)))\n| join kind=leftouter (\n    KubePodInventory\n    | where TimeGenerated > ago(1h)\n    | distinct ContainerID, PodName = Name, Namespace, ClusterName, ContainerName\n) on $left.ContainerId == $right.ContainerID\n| project\n    TimeGenerated,\n    ClusterName,\n    Namespace,\n    PodName,\n    ContainerName,\n    ContainerId,\n    LogMessage\n| summarize\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated),\n    Count = count()\n    by ClusterName, Namespace, PodName, ContainerName, LogMessage",
+        "queryFrequency": "PT5M",
+        "queryPeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT30M",
+        "suppressionEnabled": false,
+        "tactics": ["Persistence", "Defense Evasion"],
+        "techniques": ["T1505", "T1078"],
+        "alertRuleTemplateName": null,
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Host"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": ["ClusterName", "PodName"]
+          }
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "App Server Runtime Abuse in {{PodName}}",
+          "alertDescriptionFormat": "Suspicious application server activity (deployment/management) detected in container '{{ContainerName}}' in pod '{{PodName}}'. Log: {{LogMessage}}"
+        },
+        "customDetails": {
+          "ClusterName": "ClusterName",
+          "Namespace": "Namespace",
+          "PodName": "PodName",
+          "ContainerName": "ContainerName"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Host",
+            "fieldMappings": [
+              {
+                "identifier": "HostName",
+                "columnName": "ClusterName"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

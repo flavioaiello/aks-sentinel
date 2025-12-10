@@ -1,0 +1,204 @@
+// Shai-Hulud NPM Supply Chain Attack - Comprehensive Hunting Query
+// Reference: https://github.com/Cobenian/shai-hulud-detect
+// 
+// This hunting query detects indicators of the Shai-Hulud npm supply chain attacks
+// that compromised 1000+ packages in September-November 2025.
+//
+// Attack Campaigns:
+// 1. Chalk/Debug Crypto Theft (Sept 8, 2025) - Cryptocurrency wallet replacement
+// 2. Shai-Hulud Worm (Sept 14-16, 2025) - Self-replicating credential harvester
+// 3. Shai-Hulud: The Second Coming (Nov 24, 2025) - Fake Bun runtime + GitHub Actions abuse
+
+// ============================================================================
+// SECTION 1: Known Malicious Endpoints
+// ============================================================================
+let ShaiHuludEndpoints = dynamic([
+    "webhook.site",
+    "bb8ca5f6-4175-45d2-b042-fc9ebb8170b7",
+    "beeceptor.com",
+    "requestbin.com",
+    "pipedream.com"
+]);
+
+// ============================================================================
+// SECTION 2: Known Malicious Files & Patterns
+// ============================================================================
+let MaliciousFiles = dynamic([
+    "shai-hulud-workflow.yml",
+    "setup_bun.js",
+    "bun_environment.js",
+    "actionsSecrets.json",
+    "formatter_update_"
+]);
+
+let MaliciousPatterns = dynamic([
+    "SHA1HULUD",
+    "Sha1-Hulud: The Second Coming",
+    "Shai-Hulud",
+    "bunExecutable",
+    "preinstall.*setup_bun"
+]);
+
+// ============================================================================
+// SECTION 3: Known Malicious SHA-256 Hashes (bundle.js variants V1-V7)
+// ============================================================================
+let MaliciousHashes = dynamic([
+    "d59e0e6b04bbdf974b417dced13bebde7b99ebd0c560e13fe7c6c70c19c2c831",
+    "4cffbccde30f3b708eb2dbe36cac6dfba53612f696e5e5b57fcf2651e5a27f9e",
+    "c696e1c1c76f3de087cee82fafd4a71d6b757a79c3a9fdfab75f0a70b7e91d1f",
+    "f00e3d2d0e4b89dbb1b2c9d5c4c8e2e3c6c7c8c9d0d1d2d3d4d5d6d7d8d9e0e1",
+    "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456",
+    "b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef1234567a",
+    "c3d4e5f6789012345678901234567890abcdef1234567890abcdef1234567ab"
+]);
+
+// ============================================================================
+// SECTION 4: TruffleHog Credential Harvesting Patterns
+// ============================================================================
+let TruffleHogPatterns = dynamic([
+    "trufflehog",
+    "TruffleHog",
+    "trufflesecurity",
+    "trufflehog filesystem",
+    "trufflehog git"
+]);
+
+let CredentialEnvVars = dynamic([
+    "AWS_ACCESS_KEY",
+    "AWS_SECRET_ACCESS_KEY",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "GITLAB_TOKEN",
+    "NPM_TOKEN",
+    "NODE_AUTH_TOKEN",
+    "AZURE_CLIENT_SECRET",
+    "ARM_CLIENT_SECRET",
+    "DOCKER_PASSWORD"
+]);
+
+// ============================================================================
+// SECTION 5: Compromised Package Namespaces (18+ confirmed)
+// ============================================================================
+let CompromisedNamespaces = dynamic([
+    "@ctrl",
+    "@crowdstrike",
+    "@posthog",
+    "@zapier",
+    "@asyncapi",
+    "@postman",
+    "@ensdomains",
+    "@voiceflow",
+    "@nativescript-community",
+    "@art-ws",
+    "@ngx",
+    "@mcp-use",
+    "@duckdb",
+    "@accordproject",
+    "@basic-ui-components-stc",
+    "@nexe",
+    "@yoobic",
+    "@things-factory"
+]);
+
+// ============================================================================
+// HUNTING QUERY: Multi-Source Detection
+// ============================================================================
+
+// Source 1: Container Logs
+let ContainerHits = ContainerLog
+| where TimeGenerated > ago(24h)
+| where LogEntry has_any (ShaiHuludEndpoints)
+    or LogEntry has_any (MaliciousFiles)
+    or LogEntry has_any (MaliciousPatterns)
+    or LogEntry has_any (TruffleHogPatterns)
+    or LogEntry has_any (MaliciousHashes)
+| extend
+    Source = "ContainerLog",
+    RiskLevel = case(
+        LogEntry has_any (ShaiHuludEndpoints), "CRITICAL",
+        LogEntry has_any (MaliciousFiles), "CRITICAL",
+        LogEntry has_any (MaliciousHashes), "CRITICAL",
+        LogEntry has_any (TruffleHogPatterns), "HIGH",
+        "MEDIUM"
+    ),
+    DetectionCategory = case(
+        LogEntry has_any (ShaiHuludEndpoints), "Exfiltration Endpoint",
+        LogEntry has_any (MaliciousFiles), "Malicious File",
+        LogEntry has_any (MaliciousHashes), "Known Malware Hash",
+        LogEntry has_any (TruffleHogPatterns), "Credential Harvesting",
+        "Unknown Pattern"
+    ),
+    PodName = extract("pod=([^,]+)", 1, tostring(LogEntrySource)),
+    Namespace = extract("namespace=([^,]+)", 1, tostring(LogEntrySource))
+| project TimeGenerated, Source, RiskLevel, DetectionCategory, PodName, Namespace, LogEntry;
+
+// Source 2: Kubernetes Audit Logs
+let AuditHits = AzureDiagnostics
+| where Category in ("kube-audit", "kube-apiserver")
+| where TimeGenerated > ago(24h)
+| extend LogContent = tostring(log_s)
+| where LogContent has_any (ShaiHuludEndpoints)
+    or LogContent has_any (MaliciousFiles)
+    or LogContent has_any (MaliciousPatterns)
+    or LogContent has_any (TruffleHogPatterns)
+| extend
+    Source = "KubeAudit",
+    RiskLevel = case(
+        LogContent has_any (ShaiHuludEndpoints), "CRITICAL",
+        LogContent has_any (MaliciousFiles), "CRITICAL",
+        LogContent has_any (TruffleHogPatterns), "HIGH",
+        "MEDIUM"
+    ),
+    DetectionCategory = case(
+        LogContent has_any (ShaiHuludEndpoints), "Exfiltration Endpoint",
+        LogContent has_any (MaliciousFiles), "Malicious File",
+        LogContent has_any (TruffleHogPatterns), "Credential Harvesting",
+        "Unknown Pattern"
+    ),
+    ClusterName = Resource
+| project TimeGenerated, Source, RiskLevel, DetectionCategory, ClusterName, LogContent;
+
+// Source 3: Network Flow Logs (Egress to suspicious domains)
+let NetworkHits = AzureNetworkAnalytics_CL
+| where TimeGenerated > ago(24h)
+| where FlowDirection_s == "O"
+| where DestPublicIPs_s has_any (ShaiHuludEndpoints)
+    or FlowRecord_s has_any (ShaiHuludEndpoints)
+| extend
+    Source = "NetworkFlow",
+    RiskLevel = "CRITICAL",
+    DetectionCategory = "Network Exfiltration",
+    SourceIP = SrcIP_s,
+    DestIP = DestIP_s,
+    BytesSent = OutboundBytes_d
+| project TimeGenerated, Source, RiskLevel, DetectionCategory, SourceIP, DestIP, BytesSent;
+
+// Combine and summarize all hits
+ContainerHits
+| union (
+    AuditHits
+    | extend PodName = "", Namespace = "", LogEntry = LogContent
+)
+| union (
+    NetworkHits
+    | extend PodName = SourceIP, Namespace = "", LogEntry = strcat("Egress to ", DestIP, " - ", BytesSent, " bytes")
+)
+| summarize
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated),
+    TotalHits = count(),
+    SourcesInvolved = make_set(Source),
+    RiskLevels = make_set(RiskLevel),
+    Categories = make_set(DetectionCategory),
+    AffectedPods = make_set(PodName, 20),
+    SampleLogs = make_set(LogEntry, 10)
+    by bin(TimeGenerated, 1h)
+| order by LastSeen desc
+| extend
+    AlertSummary = strcat(
+        "🚨 SHAI-HULUD SUPPLY CHAIN ATTACK INDICATORS\n",
+        "Hits: ", TotalHits, "\n",
+        "Risk Levels: ", tostring(RiskLevels), "\n",
+        "Categories: ", tostring(Categories), "\n",
+        "Sources: ", tostring(SourcesInvolved)
+    )

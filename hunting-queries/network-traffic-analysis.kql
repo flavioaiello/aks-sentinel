@@ -1,0 +1,79 @@
+// AKS Network Traffic Analysis
+// Description: Analyzes network traffic patterns to identify potential exfiltration or C2 activity
+// Tactic: Exfiltration, CommandAndControl
+// Technique: T1041 - Exfiltration Over C2 Channel
+
+let LookbackPeriod = 24h;
+let DataTransferThresholdMB = 100;
+let SuspiciousPorts = dynamic([4444, 5555, 6666, 8080, 8443, 9001, 1337, 31337]);
+let InternalNetworks = dynamic(["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]);
+
+// Network flow analysis from NSG Flow Logs (if available)
+AzureNetworkAnalytics_CL
+| where TimeGenerated > ago(LookbackPeriod)
+| where SubType_s == "FlowLog"
+| extend
+    SourceIP = SrcIP_s,
+    DestinationIP = DestIP_s,
+    DestinationPort = toint(DestPort_d),
+    Protocol = L4Protocol_s,
+    BytesSent = todouble(OutboundBytes_d),
+    BytesReceived = todouble(InboundBytes_d),
+    FlowDirection = FlowDirection_s,
+    FlowStatus = FlowStatus_s
+| where FlowDirection == "O" // Outbound traffic
+| extend
+    // Check if destination is external
+    IsExternalDest = not(
+        ipv4_is_in_range(DestinationIP, "10.0.0.0/8") or
+        ipv4_is_in_range(DestinationIP, "172.16.0.0/12") or
+        ipv4_is_in_range(DestinationIP, "192.168.0.0/16")
+    ),
+    IsSuspiciousPort = DestinationPort in (SuspiciousPorts)
+| where IsExternalDest == true
+| summarize
+    TotalBytesSent = sum(BytesSent),
+    TotalBytesReceived = sum(BytesReceived),
+    FlowCount = count(),
+    UniqueDestinations = dcount(DestinationIP),
+    UniquePorts = dcount(DestinationPort),
+    Destinations = make_set(DestinationIP, 50),
+    Ports = make_set(DestinationPort, 20),
+    SuspiciousPortConnections = countif(IsSuspiciousPort)
+    by SourceIP, bin(TimeGenerated, 1h)
+| extend
+    TotalMBSent = TotalBytesSent / (1024 * 1024),
+    TotalMBReceived = TotalBytesReceived / (1024 * 1024)
+| extend
+    AnomalyIndicator = case(
+        TotalMBSent > DataTransferThresholdMB and UniqueDestinations > 10, "High - Large Transfer to Many Destinations",
+        TotalMBSent > DataTransferThresholdMB, "Medium - Large Data Transfer",
+        SuspiciousPortConnections > 0, "Medium - Suspicious Port Usage",
+        UniqueDestinations > 50, "Low - High Destination Diversity",
+        "Normal"
+    )
+| where AnomalyIndicator != "Normal"
+| project
+    TimeGenerated,
+    SourceIP,
+    TotalMBSent,
+    TotalMBReceived,
+    FlowCount,
+    UniqueDestinations,
+    UniquePorts,
+    SuspiciousPortConnections,
+    AnomalyIndicator,
+    Destinations,
+    Ports
+| sort by TotalMBSent desc
+
+// If NSG Flow Logs are not available, you can use Container Insights DNS data
+// union (
+//     ContainerLog
+//     | where TimeGenerated > ago(LookbackPeriod)
+//     | where LogEntry has "DNS" or LogEntry has "resolve"
+//     | extend Domain = extract(@"([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}", 0, LogEntry)
+//     | where isnotempty(Domain)
+//     | summarize QueryCount = count() by Domain, bin(TimeGenerated, 1h)
+//     | sort by QueryCount desc
+// )

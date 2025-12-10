@@ -1,0 +1,70 @@
+// AKS User Activity Timeline
+// Description: Builds a comprehensive timeline of user activities for investigation
+// Tactic: Discovery
+// Technique: T1087 - Account Discovery
+
+// Parameters - adjust as needed
+let InvestigationUser = ""; // Set to specific username or leave empty for all users
+let LookbackPeriod = 24h;
+
+AzureDiagnostics
+| where Category == "kube-audit"
+| where TimeGenerated > ago(LookbackPeriod)
+| extend log = parse_json(log_s)
+| extend
+    verb = tostring(log.verb),
+    objectRef = log.objectRef,
+    user = log.user,
+    sourceIPs = log.sourceIPs,
+    responseStatus = log.responseStatus,
+    userAgent = tostring(log.userAgent)
+| extend
+    Resource_Type = tostring(objectRef.resource),
+    ResourceName = tostring(objectRef.name),
+    Namespace = tostring(objectRef.namespace),
+    Subresource = tostring(objectRef.subresource),
+    Username = tostring(user.username),
+    UserGroups = tostring(user.groups),
+    SourceIP = tostring(sourceIPs[0]),
+    StatusCode = toint(responseStatus.code),
+    ClusterName = Resource
+| where InvestigationUser == "" or Username == InvestigationUser
+| where not(Username startswith "system:") // Filter out system users, remove if investigating system accounts
+| extend
+    ActivityType = case(
+        verb == "create" and Resource_Type == "pods", "Pod Created",
+        verb == "delete" and Resource_Type == "pods", "Pod Deleted",
+        Resource_Type == "secrets" and verb in ("get", "list"), "Secret Access",
+        Resource_Type == "pods" and Subresource == "exec", "Pod Exec",
+        Resource_Type == "pods" and Subresource == "log", "Log Access",
+        Resource_Type in ("clusterroles", "clusterrolebindings", "roles", "rolebindings"), "RBAC Change",
+        Resource_Type == "serviceaccounts", "Service Account Activity",
+        Resource_Type == "configmaps", "ConfigMap Activity",
+        verb == "create", "Resource Created",
+        verb == "delete", "Resource Deleted",
+        verb in ("update", "patch"), "Resource Modified",
+        verb in ("get", "list", "watch"), "Resource Read",
+        "Other"
+    )
+| extend
+    IsSuccess = StatusCode in (200, 201, 202, 204),
+    IsSensitiveResource = Resource_Type in ("secrets", "serviceaccounts", "clusterroles", "clusterrolebindings")
+| project
+    TimeGenerated,
+    ClusterName,
+    Username,
+    SourceIP,
+    ActivityType,
+    verb,
+    Resource_Type,
+    ResourceName,
+    Namespace,
+    Subresource,
+    IsSuccess,
+    StatusCode,
+    IsSensitiveResource,
+    userAgent
+| order by TimeGenerated asc
+
+// To visualize as a timeline, you can use:
+// | render timechart with (ycolumns=ActivityType, series=Username)

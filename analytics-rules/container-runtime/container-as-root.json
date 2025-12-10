@@ -1,0 +1,96 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "AKS Container Running as Root",
+    "description": "Detects containers explicitly configured to run as root user (UID 0).",
+    "severity": "Medium",
+    "requiredDataConnectors": [
+      {
+        "connectorId": "AzureKubernetesService",
+        "dataTypes": ["AzureDiagnostics"]
+      }
+    ],
+    "tactics": ["PrivilegeEscalation"],
+    "techniques": ["T1611"],
+    "version": "1.0.0"
+  },
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Log Analytics workspace name"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2025-09-01",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/aks-container-root')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "AKS Container Running as Root User",
+        "description": "Detects containers explicitly configured to run as root user (UID 0) or with runAsNonRoot set to false.",
+        "severity": "Medium",
+        "enabled": true,
+        "query": "AzureDiagnostics\n| where Category == \"kube-audit\"\n| where TimeGenerated > ago(5m)\n| extend log = parse_json(log_s)\n| extend verb = tostring(log.verb)\n| extend objectRef = log.objectRef\n| extend requestObject = log.requestObject\n| extend user = log.user\n| where verb in (\"create\", \"update\", \"patch\")\n| where objectRef.resource == \"pods\"\n| extend containers = requestObject.spec.containers\n| mv-expand container = containers\n| extend securityContext = container.securityContext\n| extend podSecurityContext = requestObject.spec.securityContext\n| where \n    securityContext.runAsUser == 0 or\n    podSecurityContext.runAsUser == 0 or\n    securityContext.runAsNonRoot == false\n| extend\n    PodName = tostring(objectRef.name),\n    Namespace = tostring(objectRef.namespace),\n    ContainerName = tostring(container.name),\n    ContainerImage = tostring(container.image),\n    RunAsUser = coalesce(tostring(securityContext.runAsUser), tostring(podSecurityContext.runAsUser)),\n    RunAsNonRoot = tostring(securityContext.runAsNonRoot),\n    Username = tostring(user.username),\n    ClusterName = Resource\n| where Namespace !in (\"kube-system\", \"gatekeeper-system\", \"azure-arc\", \"calico-system\")\n| project\n    TimeGenerated,\n    ClusterName,\n    Namespace,\n    PodName,\n    ContainerName,\n    ContainerImage,\n    RunAsUser,\n    RunAsNonRoot,\n    Username\n| summarize\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated),\n    Count = count()\n    by ClusterName, Namespace, PodName, ContainerName, ContainerImage, RunAsUser, Username",
+        "queryFrequency": "PT5M",
+        "queryPeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": ["PrivilegeEscalation"],
+        "techniques": ["T1611"],
+        "alertRuleTemplateName": null,
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Host"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": ["ClusterName", "Namespace"]
+          }
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Container Running as Root: {{ContainerName}} in {{PodName}}",
+          "alertDescriptionFormat": "Container '{{ContainerName}}' in pod '{{PodName}}' is running as root user. This increases the risk of container escape."
+        },
+        "customDetails": {
+          "ClusterName": "ClusterName",
+          "Namespace": "Namespace",
+          "PodName": "PodName",
+          "ContainerName": "ContainerName",
+          "RunAsUser": "RunAsUser"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Host",
+            "fieldMappings": [
+              {
+                "identifier": "HostName",
+                "columnName": "ClusterName"
+              }
+            ]
+          },
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "Username"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

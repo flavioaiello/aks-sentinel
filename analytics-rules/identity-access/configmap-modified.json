@@ -1,0 +1,104 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "AKS Configmap Modified",
+    "description": "Detects modification of configmaps which may contain sensitive configuration.",
+    "severity": "Medium",
+    "requiredDataConnectors": [
+      {
+        "connectorId": "AzureKubernetesService",
+        "dataTypes": ["AzureDiagnostics"]
+      }
+    ],
+    "tactics": ["Persistence", "DefenseEvasion"],
+    "techniques": ["T1565"],
+    "version": "1.0.0"
+  },
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Log Analytics workspace name"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2025-09-01",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/aks-configmap-modify')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "AKS Sensitive ConfigMap Modified",
+        "description": "Detects when sensitive ConfigMaps are modified, which may indicate configuration tampering.",
+        "severity": "Medium",
+        "enabled": true,
+        "query": "let SensitiveConfigMaps = dynamic([\"aws-auth\", \"kube-proxy\", \"coredns\", \"azure-ip-masq-agent-config\"]);\nAzureDiagnostics\n| where Category == \"kube-audit\"\n| where TimeGenerated > ago(5m)\n| extend log = parse_json(log_s)\n| extend verb = tostring(log.verb)\n| extend objectRef = log.objectRef\n| extend user = log.user\n| extend sourceIPs = log.sourceIPs\n| extend responseStatus = log.responseStatus\n| where objectRef.resource == \"configmaps\"\n| where verb in (\"update\", \"patch\", \"delete\")\n| where responseStatus.code in (200, 201, 204)\n| extend\n    ConfigMapName = tostring(objectRef.name),\n    Namespace = tostring(objectRef.namespace),\n    Username = tostring(user.username),\n    SourceIP = tostring(sourceIPs[0]),\n    Verb = verb,\n    ClusterName = Resource\n| where ConfigMapName in (SensitiveConfigMaps) or Namespace == \"kube-system\"\n| where not(Username startswith \"system:\")\n| project\n    TimeGenerated,\n    ClusterName,\n    Namespace,\n    ConfigMapName,\n    Verb,\n    Username,\n    SourceIP\n| summarize\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated),\n    ModificationCount = count(),\n    Verbs = make_set(Verb, 5)\n    by ClusterName, Namespace, ConfigMapName, Username, SourceIP",
+        "queryFrequency": "PT5M",
+        "queryPeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": ["Persistence", "DefenseEvasion"],
+        "techniques": ["T1565"],
+        "alertRuleTemplateName": null,
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": ["ClusterName", "ConfigMapName"]
+          }
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "ConfigMap Modified: {{ConfigMapName}}",
+          "alertDescriptionFormat": "Sensitive ConfigMap '{{ConfigMapName}}' in namespace '{{Namespace}}' was modified by '{{Username}}'."
+        },
+        "customDetails": {
+          "ClusterName": "ClusterName",
+          "Namespace": "Namespace",
+          "ConfigMapName": "ConfigMapName",
+          "Username": "Username"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Host",
+            "fieldMappings": [
+              {
+                "identifier": "HostName",
+                "columnName": "ClusterName"
+              }
+            ]
+          },
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "Username"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "SourceIP"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

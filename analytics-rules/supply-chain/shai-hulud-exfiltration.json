@@ -1,0 +1,84 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "Shai-Hulud NPM Supply Chain Attack - Exfiltration Detection",
+    "description": "Detects network activity to known Shai-Hulud malicious endpoints including webhook.site and the specific exfiltration UUID.",
+    "severity": "Critical",
+    "requiredDataConnectors": [
+      {
+        "connectorId": "AzureKubernetesService",
+        "dataTypes": ["AzureDiagnostics"]
+      },
+      {
+        "connectorId": "ContainerInsights",
+        "dataTypes": ["ContainerLog"]
+      },
+      {
+        "connectorId": "AzureNetworkWatcher",
+        "dataTypes": ["AzureNetworkAnalytics_CL"]
+      }
+    ],
+    "tactics": ["Exfiltration", "CommandAndControl"],
+    "techniques": ["T1567.002", "T1071.001"],
+    "relevantTechniques": ["Supply Chain Compromise"],
+    "version": "1.0.0"
+  },
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Log Analytics workspace name"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2025-09-01",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/shai-hulud-exfiltration')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Shai-Hulud NPM Attack - Malicious Exfiltration Endpoint",
+        "description": "Detects connections to known Shai-Hulud supply chain attack endpoints. This attack compromised 1000+ npm packages in September-November 2025 and exfiltrated credentials via webhook.site.",
+        "severity": "High",
+        "enabled": true,
+        "query": "// Shai-Hulud NPM Supply Chain Attack - Exfiltration Detection\n// Reference: https://github.com/Cobenian/shai-hulud-detect\nlet ShaiHuludEndpoints = dynamic([\n    \"webhook.site\",\n    \"bb8ca5f6-4175-45d2-b042-fc9ebb8170b7\",\n    \"beeceptor.com\",\n    \"requestbin.com\",\n    \"pipedream.com\"\n]);\nlet ShaiHuludDomains = dynamic([\n    \"webhook.site\",\n    \"beeceptor.com\",\n    \"requestbin.com\",\n    \"pipedream.net\"\n]);\n// Check Container Logs\nlet ContainerMatches = ContainerLog\n| where TimeGenerated > ago(5m)\n| where LogEntry has_any (ShaiHuludEndpoints)\n| extend\n    Source = \"ContainerLog\",\n    MatchedPattern = extract(@\"(webhook\\.site|bb8ca5f6-4175-45d2-b042-fc9ebb8170b7|beeceptor\\.com|requestbin\\.com)\", 1, LogEntry),\n    PodInfo = LogEntrySource\n| project TimeGenerated, Source, MatchedPattern, LogEntry, ContainerID, PodInfo;\n// Check Kubernetes Audit Logs\nlet AuditMatches = AzureDiagnostics\n| where Category in (\"kube-audit\", \"kube-apiserver\")\n| where TimeGenerated > ago(5m)\n| extend LogContent = tostring(log_s)\n| where LogContent has_any (ShaiHuludEndpoints)\n| extend\n    Source = \"KubeAudit\",\n    MatchedPattern = extract(@\"(webhook\\.site|bb8ca5f6-4175-45d2-b042-fc9ebb8170b7|beeceptor\\.com|requestbin\\.com)\", 1, LogContent),\n    ClusterName = Resource\n| project TimeGenerated, Source, MatchedPattern, LogContent, ClusterName;\n// Check Network Flow Logs for exfiltration domains\nlet NetworkMatches = AzureNetworkAnalytics_CL\n| where TimeGenerated > ago(5m)\n| where FlowDirection_s == \"O\"\n| where DestPublicIPs_s has_any (ShaiHuludDomains) or FlowRecord_s has_any (ShaiHuludDomains)\n| extend\n    Source = \"NetworkFlow\",\n    MatchedPattern = extract(@\"(webhook\\.site|beeceptor\\.com|requestbin\\.com)\", 1, FlowRecord_s),\n    SourceIP = SrcIP_s,\n    DestIP = DestIP_s,\n    BytesSent = OutboundBytes_d\n| project TimeGenerated, Source, MatchedPattern, SourceIP, DestIP, BytesSent;\n// Union all sources\nContainerMatches\n| union AuditMatches\n| union NetworkMatches\n| summarize\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated),\n    HitCount = count(),\n    Sources = make_set(Source),\n    Patterns = make_set(MatchedPattern)\n    by bin(TimeGenerated, 5m)",
+        "queryFrequency": "PT5M",
+        "queryPeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": ["Exfiltration", "CommandAndControl"],
+        "techniques": ["T1567", "T1071"],
+        "alertRuleTemplateName": null,
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": true,
+            "lookbackDuration": "PT4H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Host", "IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "🚨 CRITICAL: Shai-Hulud Supply Chain Attack Detected",
+          "alertDescriptionFormat": "Detected {{HitCount}} connections to known Shai-Hulud malicious endpoints. Patterns matched: {{Patterns}}. This indicates a potential npm supply chain compromise. IMMEDIATE ACTION REQUIRED."
+        },
+        "customDetails": {
+          "MatchedPatterns": "Patterns",
+          "DataSources": "Sources",
+          "HitCount": "HitCount"
+        },
+        "entityMappings": []
+      }
+    }
+  ]
+}

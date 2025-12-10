@@ -1,0 +1,96 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "AKS ClusterRole or ClusterRoleBinding Creation",
+    "description": "Detects creation of ClusterRole or ClusterRoleBinding which may indicate privilege escalation.",
+    "severity": "High",
+    "requiredDataConnectors": [
+      {
+        "connectorId": "AzureKubernetesService",
+        "dataTypes": ["AzureDiagnostics"]
+      }
+    ],
+    "tactics": ["PrivilegeEscalation", "Persistence"],
+    "techniques": ["T1078", "T1098"],
+    "version": "1.0.0"
+  },
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Log Analytics workspace name"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2025-09-01",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/aks-cluster-role-creation')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "AKS ClusterRole or ClusterRoleBinding Created",
+        "description": "Detects when cluster-wide RBAC roles or bindings are created, which could indicate privilege escalation attempts.",
+        "severity": "High",
+        "enabled": true,
+        "query": "AzureDiagnostics\n| where Category == \"kube-audit\"\n| where TimeGenerated > ago(5m)\n| extend log = parse_json(log_s)\n| extend verb = tostring(log.verb)\n| extend objectRef = log.objectRef\n| extend requestObject = log.requestObject\n| extend user = log.user\n| extend responseStatus = log.responseStatus\n| where objectRef.resource in (\"clusterroles\", \"clusterrolebindings\")\n| where verb == \"create\"\n| where responseStatus.code in (200, 201)\n| extend\n    ResourceName = tostring(objectRef.name),\n    ResourceType = tostring(objectRef.resource),\n    Username = tostring(user.username),\n    UserGroups = tostring(user.groups),\n    ClusterName = Resource\n| extend\n    Rules = tostring(requestObject.rules),\n    RoleRef = tostring(requestObject.roleRef),\n    Subjects = tostring(requestObject.subjects)\n| where not(Username startswith \"system:\")\n| project\n    TimeGenerated,\n    ClusterName,\n    ResourceType,\n    ResourceName,\n    Username,\n    UserGroups,\n    Rules,\n    RoleRef,\n    Subjects\n| summarize\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated),\n    Count = count()\n    by ClusterName, ResourceType, ResourceName, Username, Rules, RoleRef, Subjects",
+        "queryFrequency": "PT5M",
+        "queryPeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": ["PrivilegeEscalation", "Persistence"],
+        "techniques": ["T1078", "T1098"],
+        "alertRuleTemplateName": null,
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": ["ClusterName", "ResourceType"]
+          }
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "{{ResourceType}} Created: {{ResourceName}}",
+          "alertDescriptionFormat": "User '{{Username}}' created {{ResourceType}} '{{ResourceName}}' in cluster '{{ClusterName}}'. This may indicate privilege escalation."
+        },
+        "customDetails": {
+          "ClusterName": "ClusterName",
+          "ResourceType": "ResourceType",
+          "ResourceName": "ResourceName",
+          "Username": "Username",
+          "Rules": "Rules"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Host",
+            "fieldMappings": [
+              {
+                "identifier": "HostName",
+                "columnName": "ClusterName"
+              }
+            ]
+          },
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "Username"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

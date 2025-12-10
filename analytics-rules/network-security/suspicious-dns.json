@@ -1,0 +1,86 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "AKS DNS Query to Suspicious Domain",
+    "description": "Detects DNS queries to suspicious or malicious domains from AKS pods.",
+    "severity": "High",
+    "requiredDataConnectors": [
+      {
+        "connectorId": "ContainerInsights",
+        "dataTypes": ["ContainerLog"]
+      }
+    ],
+    "tactics": ["CommandAndControl"],
+    "techniques": ["T1071.004"],
+    "version": "1.0.0"
+  },
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Log Analytics workspace name"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2025-09-01",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/aks-suspicious-dns')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "AKS DNS Query to Suspicious Domain",
+        "description": "Detects DNS queries from AKS pods to domains associated with crypto mining, C2 servers, or data exfiltration.",
+        "severity": "High",
+        "enabled": true,
+        "query": "// Suspicious domain patterns - customize for your environment\nlet SuspiciousDomainPatterns = dynamic([\"xmr\", \"monero\", \"mining\", \"coinhive\", \"nicehash\", \"cryptonight\", \"minexmr\", \"pool.mining\", \"stratum\"]);\nlet SuspiciousTLDs = dynamic([\".tk\", \".ml\", \".ga\", \".cf\", \".gq\", \".xyz\", \".top\", \".work\", \".click\", \".loan\"]);\nlet TIIndicators = ThreatIntelligenceIndicator\n| where TimeGenerated > ago(14d)\n| where isnotempty(DomainName)\n| where Active == true\n| summarize LatestIndicator = arg_max(TimeGenerated, *) by DomainName\n| project TI_Domain = tolower(DomainName), ThreatType, ConfidenceScore;\nAzureDiagnostics\n| where Category == \"kube-audit\"\n| where TimeGenerated > ago(5m)\n// Alternative: use CoreDNS logs if available\n| union (\n    ContainerLog\n    | where TimeGenerated > ago(5m)\n    | where LogEntry has \"query\" and LogEntry has \"A\"\n    | extend Domain = extract(@\"query:\\s*([^\\s]+)\", 1, LogEntry)\n)\n| where isnotempty(Domain)\n| extend DomainLower = tolower(Domain)\n| where DomainLower has_any (SuspiciousDomainPatterns)\n    or DomainLower endswith_any (SuspiciousTLDs)\n| join kind=leftouter (TIIndicators) on $left.DomainLower == $right.TI_Domain\n| extend\n    IsMalicious = isnotempty(TI_Domain),\n    ClusterName = Resource\n| project\n    TimeGenerated,\n    ClusterName,\n    Domain,\n    IsMalicious,\n    ThreatType,\n    ConfidenceScore\n| summarize\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated),\n    QueryCount = count(),\n    UniqueDomains = make_set(Domain, 50)\n    by ClusterName, IsMalicious, ThreatType",
+        "queryFrequency": "PT5M",
+        "queryPeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT30M",
+        "suppressionEnabled": false,
+        "tactics": ["CommandAndControl"],
+        "techniques": ["T1071.004"],
+        "alertRuleTemplateName": null,
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Host", "DNS"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": ["ClusterName"]
+          }
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Suspicious DNS Queries from AKS Cluster: {{ClusterName}}",
+          "alertDescriptionFormat": "Detected {{QueryCount}} DNS queries to suspicious domains from cluster '{{ClusterName}}'. Domains queried: {{UniqueDomains}}"
+        },
+        "customDetails": {
+          "ClusterName": "ClusterName",
+          "QueryCount": "QueryCount",
+          "IsMalicious": "IsMalicious",
+          "ThreatType": "ThreatType"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Host",
+            "fieldMappings": [
+              {
+                "identifier": "HostName",
+                "columnName": "ClusterName"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

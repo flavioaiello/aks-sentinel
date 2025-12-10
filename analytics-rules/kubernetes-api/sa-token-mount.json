@@ -1,0 +1,95 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "AKS Service Account Token Mounted",
+    "description": "Detects pods with automountServiceAccountToken enabled in sensitive namespaces.",
+    "severity": "Medium",
+    "requiredDataConnectors": [
+      {
+        "connectorId": "AzureKubernetesService",
+        "dataTypes": ["AzureDiagnostics"]
+      }
+    ],
+    "tactics": ["CredentialAccess", "LateralMovement"],
+    "techniques": ["T1552.007"],
+    "version": "1.0.0"
+  },
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Log Analytics workspace name"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2025-09-01",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/aks-sa-token-mount')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "AKS Service Account Token Auto-Mount",
+        "description": "Detects pods with automountServiceAccountToken enabled, which can be exploited for lateral movement.",
+        "severity": "Medium",
+        "enabled": true,
+        "query": "let SensitiveNamespaces = dynamic([\"default\", \"production\", \"prod\"]);\nAzureDiagnostics\n| where Category == \"kube-audit\"\n| where TimeGenerated > ago(5m)\n| extend log = parse_json(log_s)\n| extend verb = tostring(log.verb)\n| extend objectRef = log.objectRef\n| extend requestObject = log.requestObject\n| extend user = log.user\n| where verb == \"create\"\n| where objectRef.resource == \"pods\"\n| extend\n    PodName = tostring(objectRef.name),\n    Namespace = tostring(objectRef.namespace),\n    ServiceAccountName = tostring(requestObject.spec.serviceAccountName),\n    AutomountToken = tobool(requestObject.spec.automountServiceAccountToken),\n    Username = tostring(user.username),\n    ClusterName = Resource\n| where AutomountToken == true or isnull(AutomountToken)\n| where Namespace in (SensitiveNamespaces) or ServiceAccountName != \"default\"\n| where not(Username startswith \"system:\")\n| project\n    TimeGenerated,\n    ClusterName,\n    Namespace,\n    PodName,\n    ServiceAccountName,\n    AutomountToken,\n    Username\n| summarize\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated),\n    Count = count()\n    by ClusterName, Namespace, PodName, ServiceAccountName, Username",
+        "queryFrequency": "PT5M",
+        "queryPeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": ["CredentialAccess", "LateralMovement"],
+        "techniques": ["T1552.007"],
+        "alertRuleTemplateName": null,
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": ["ClusterName", "Namespace"]
+          }
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "SA Token Auto-Mount: {{ServiceAccountName}} in {{Namespace}}",
+          "alertDescriptionFormat": "Pod '{{PodName}}' in namespace '{{Namespace}}' has automountServiceAccountToken enabled for service account '{{ServiceAccountName}}'."
+        },
+        "customDetails": {
+          "ClusterName": "ClusterName",
+          "Namespace": "Namespace",
+          "PodName": "PodName",
+          "ServiceAccountName": "ServiceAccountName"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Host",
+            "fieldMappings": [
+              {
+                "identifier": "HostName",
+                "columnName": "ClusterName"
+              }
+            ]
+          },
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "Username"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

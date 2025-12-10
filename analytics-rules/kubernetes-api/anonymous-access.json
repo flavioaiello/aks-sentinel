@@ -1,0 +1,94 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "AKS Anonymous API Access",
+    "description": "Detects API requests made with anonymous authentication.",
+    "severity": "Critical",
+    "requiredDataConnectors": [
+      {
+        "connectorId": "AzureKubernetesService",
+        "dataTypes": ["AzureDiagnostics"]
+      }
+    ],
+    "tactics": ["InitialAccess", "Discovery"],
+    "techniques": ["T1190", "T1613"],
+    "version": "1.0.0"
+  },
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Log Analytics workspace name"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2025-09-01",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/aks-anonymous-access')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "AKS Anonymous API Access Detected",
+        "description": "Detects when the Kubernetes API is accessed using anonymous authentication, indicating potential misconfiguration or exploitation.",
+        "severity": "Critical",
+        "enabled": true,
+        "query": "AzureDiagnostics\n| where Category == \"kube-audit\"\n| where TimeGenerated > ago(5m)\n| extend log = parse_json(log_s)\n| extend verb = tostring(log.verb)\n| extend objectRef = log.objectRef\n| extend user = log.user\n| extend sourceIPs = log.sourceIPs\n| extend responseStatus = log.responseStatus\n| where user.username == \"system:anonymous\"\n| where responseStatus.code in (200, 201, 202, 204)\n| extend\n    Resource_Type = tostring(objectRef.resource),\n    ResourceName = tostring(objectRef.name),\n    Namespace = tostring(objectRef.namespace),\n    SourceIP = tostring(sourceIPs[0]),\n    Verb = verb,\n    StatusCode = tostring(responseStatus.code),\n    ClusterName = Resource\n| project\n    TimeGenerated,\n    ClusterName,\n    Verb,\n    Resource_Type,\n    ResourceName,\n    Namespace,\n    SourceIP,\n    StatusCode\n| summarize\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated),\n    RequestCount = count(),\n    Verbs = make_set(Verb, 10),\n    Resources = make_set(Resource_Type, 20)\n    by ClusterName, SourceIP",
+        "queryFrequency": "PT5M",
+        "queryPeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT30M",
+        "suppressionEnabled": false,
+        "tactics": ["InitialAccess", "Discovery"],
+        "techniques": ["T1190", "T1613"],
+        "alertRuleTemplateName": null,
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": ["ClusterName", "SourceIP"]
+          }
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Anonymous API Access from {{SourceIP}}",
+          "alertDescriptionFormat": "Anonymous access to Kubernetes API detected from {{SourceIP}} with {{RequestCount}} requests. This indicates a critical security misconfiguration."
+        },
+        "customDetails": {
+          "ClusterName": "ClusterName",
+          "SourceIP": "SourceIP",
+          "RequestCount": "RequestCount"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Host",
+            "fieldMappings": [
+              {
+                "identifier": "HostName",
+                "columnName": "ClusterName"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "SourceIP"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

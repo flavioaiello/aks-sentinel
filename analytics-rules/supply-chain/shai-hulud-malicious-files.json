@@ -1,0 +1,91 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "Shai-Hulud Attack - Malicious File Patterns",
+    "description": "Detects file creation patterns associated with the Shai-Hulud npm supply chain attack including setup_bun.js, bun_environment.js, actionsSecrets.json, and shai-hulud-workflow.yml.",
+    "severity": "Critical",
+    "requiredDataConnectors": [
+      {
+        "connectorId": "ContainerInsights",
+        "dataTypes": ["ContainerLog"]
+      },
+      {
+        "connectorId": "AzureKubernetesService",
+        "dataTypes": ["AzureDiagnostics"]
+      }
+    ],
+    "tactics": ["Execution", "Persistence", "Exfiltration"],
+    "techniques": ["T1204.002", "T1195.002"],
+    "version": "1.0.0"
+  },
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Log Analytics workspace name"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2025-09-01",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/shai-hulud-malicious-files')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Shai-Hulud Attack - Malicious File Patterns Detected",
+        "description": "Detects file patterns associated with the Shai-Hulud npm supply chain attacks (September-November 2025). Includes fake Bun runtime files, workflow injection files, and credential exfiltration artifacts.",
+        "severity": "High",
+        "enabled": true,
+        "query": "// Shai-Hulud Malicious File Detection\n// September 2025: shai-hulud-workflow.yml\n// November 2025: setup_bun.js, bun_environment.js, actionsSecrets.json, formatter_*.yml\nlet MaliciousFilePatterns = dynamic([\n    \"shai-hulud-workflow.yml\",\n    \"shai-hulud-workflow\",\n    \"setup_bun.js\",\n    \"bun_environment.js\",\n    \"actionsSecrets.json\",\n    \"formatter_update_\",\n    \"SHA1HULUD\"\n]);\nlet MaliciousHashesV1toV7 = dynamic([\n    \"d59e0e6b04bbdf974b417dced13bebde7b99ebd0c560e13fe7c6c70c19c2c831\",\n    \"4cffbccde30f3b708eb2dbe36cac6dfba53612f696e5e5b57fcf2651e5a27f9e\",\n    \"c696e1c1c76f3de087cee82fafd4a71d6b757a79c3a9fdfab75f0a70b7e91d1f\"\n]);\nlet SuspiciousPatterns = dynamic([\n    \"Sha1-Hulud: The Second Coming\",\n    \"Shai-Hulud\",\n    \"preinstall.*setup_bun\",\n    \"bunExecutable\"\n]);\n// Search container logs\nContainerLog\n| where TimeGenerated > ago(5m)\n| where LogEntry has_any (MaliciousFilePatterns)\n    or LogEntry has_any (SuspiciousPatterns)\n    or LogEntry has_any (MaliciousHashesV1toV7)\n| extend\n    PodName = extract(\"pod=([^,]+)\", 1, tostring(LogEntrySource)),\n    Namespace = extract(\"namespace=([^,]+)\", 1, tostring(LogEntrySource)),\n    DetectedPattern = case(\n        LogEntry has \"setup_bun.js\", \"November 2025 - Fake Bun Installer\",\n        LogEntry has \"bun_environment.js\", \"November 2025 - Obfuscated Payload\",\n        LogEntry has \"actionsSecrets.json\", \"November 2025 - Credential Exfil File\",\n        LogEntry has \"shai-hulud-workflow\", \"September 2025 - Malicious Workflow\",\n        LogEntry has \"SHA1HULUD\", \"November 2025 - Malicious GitHub Runner\",\n        LogEntry has \"formatter_update_\", \"November 2025 - Malicious Workflow\",\n        LogEntry has \"Second Coming\", \"November 2025 - Attack Signature\",\n        LogEntry has_any (MaliciousHashesV1toV7), \"Known Malicious Bundle Hash\",\n        \"Unknown Shai-Hulud Pattern\"\n    ),\n    AttackCampaign = case(\n        LogEntry has_any (\"setup_bun\", \"bun_environment\", \"SHA1HULUD\", \"formatter_update\"), \"November 2025 - The Second Coming\",\n        LogEntry has \"shai-hulud-workflow\", \"September 2025 - Original Worm\",\n        \"Unknown Campaign\"\n    ),\n    Severity = \"CRITICAL\"\n| project\n    TimeGenerated,\n    PodName,\n    Namespace,\n    ContainerID,\n    DetectedPattern,\n    AttackCampaign,\n    Severity,\n    LogEntry\n| summarize\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated),\n    HitCount = count(),\n    Patterns = make_set(DetectedPattern),\n    Campaigns = make_set(AttackCampaign),\n    SampleLogs = make_set(LogEntry, 3)\n    by PodName, Namespace",
+        "queryFrequency": "PT5M",
+        "queryPeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": ["Execution", "Persistence", "Exfiltration"],
+        "techniques": ["T1204", "T1195"],
+        "alertRuleTemplateName": null,
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": true,
+            "lookbackDuration": "PT4H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Host"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": ["PodName"]
+          }
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "🚨 CRITICAL: Shai-Hulud Malicious Files in {{PodName}}",
+          "alertDescriptionFormat": "Detected {{HitCount}} instances of Shai-Hulud attack patterns in pod '{{PodName}}'. Campaigns: {{Campaigns}}. Patterns: {{Patterns}}. This indicates active supply chain compromise. ISOLATE IMMEDIATELY."
+        },
+        "customDetails": {
+          "PodName": "PodName",
+          "Namespace": "Namespace",
+          "AttackCampaigns": "Campaigns",
+          "DetectedPatterns": "Patterns",
+          "HitCount": "HitCount"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Host",
+            "fieldMappings": [
+              {
+                "identifier": "HostName",
+                "columnName": "PodName"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

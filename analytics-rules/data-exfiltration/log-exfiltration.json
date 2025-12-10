@@ -1,0 +1,105 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "AKS Potential Data Exfiltration via Pod Logs",
+    "description": "Detects excessive log retrieval which may indicate data exfiltration.",
+    "severity": "High",
+    "requiredDataConnectors": [
+      {
+        "connectorId": "AzureKubernetesService",
+        "dataTypes": ["AzureDiagnostics"]
+      }
+    ],
+    "tactics": ["Exfiltration", "Collection"],
+    "techniques": ["T1530"],
+    "version": "1.0.0"
+  },
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Log Analytics workspace name"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2025-09-01",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/aks-log-exfil')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "AKS Potential Data Exfiltration via Logs",
+        "description": "Detects excessive retrieval of pod logs which may indicate data exfiltration attempts.",
+        "severity": "High",
+        "enabled": true,
+        "query": "let LogAccessThreshold = 50;\nlet TimeWindow = 5m;\nAzureDiagnostics\n| where Category == \"kube-audit\"\n| where TimeGenerated > ago(TimeWindow)\n| extend log = parse_json(log_s)\n| extend verb = tostring(log.verb)\n| extend objectRef = log.objectRef\n| extend user = log.user\n| extend sourceIPs = log.sourceIPs\n| where objectRef.resource == \"pods\" and objectRef.subresource == \"log\"\n| where verb == \"get\"\n| extend\n    PodName = tostring(objectRef.name),\n    Namespace = tostring(objectRef.namespace),\n    Username = tostring(user.username),\n    SourceIP = tostring(sourceIPs[0]),\n    ClusterName = Resource\n| where not(Username startswith \"system:\")\n| summarize\n    LogAccessCount = count(),\n    FirstAccess = min(TimeGenerated),\n    LastAccess = max(TimeGenerated),\n    PodsAccessed = make_set(PodName, 50),\n    Namespaces = make_set(Namespace, 20)\n    by ClusterName, Username, SourceIP, bin(TimeGenerated, TimeWindow)\n| where LogAccessCount >= LogAccessThreshold\n| extend UniquePodsAccessed = array_length(PodsAccessed)\n| project\n    TimeGenerated,\n    ClusterName,\n    Username,\n    SourceIP,\n    LogAccessCount,\n    UniquePodsAccessed,\n    PodsAccessed,\n    Namespaces,\n    FirstAccess,\n    LastAccess",
+        "queryFrequency": "PT5M",
+        "queryPeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT30M",
+        "suppressionEnabled": false,
+        "tactics": ["Exfiltration", "Collection"],
+        "techniques": ["T1530"],
+        "alertRuleTemplateName": null,
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": true,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Account", "IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": ["ClusterName", "Username"]
+          }
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Excessive Log Access by {{Username}}",
+          "alertDescriptionFormat": "User '{{Username}}' accessed logs from {{UniquePodsAccessed}} unique pods ({{LogAccessCount}} total requests) from IP {{SourceIP}}."
+        },
+        "customDetails": {
+          "ClusterName": "ClusterName",
+          "Username": "Username",
+          "SourceIP": "SourceIP",
+          "LogAccessCount": "LogAccessCount",
+          "UniquePodsAccessed": "UniquePodsAccessed"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Host",
+            "fieldMappings": [
+              {
+                "identifier": "HostName",
+                "columnName": "ClusterName"
+              }
+            ]
+          },
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "Username"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "SourceIP"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

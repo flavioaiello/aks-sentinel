@@ -1,0 +1,87 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "Shai-Hulud NPM Attack - TruffleHog Credential Harvesting",
+    "description": "Detects TruffleHog credential scanning tool abuse associated with the Shai-Hulud npm supply chain attack (Sept-Nov 2025).",
+    "severity": "Critical",
+    "requiredDataConnectors": [
+      {
+        "connectorId": "ContainerInsights",
+        "dataTypes": ["ContainerLog"]
+      }
+    ],
+    "tactics": ["CredentialAccess", "Collection"],
+    "techniques": ["T1552.001", "T1119"],
+    "version": "1.0.0"
+  },
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Log Analytics workspace name"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2025-09-01",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/shai-hulud-trufflehog')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Shai-Hulud Attack - TruffleHog Credential Harvesting",
+        "description": "Detects TruffleHog credential scanning patterns used in the Shai-Hulud npm supply chain attacks. The November 2025 'Second Coming' variant used fake Bun runtime installation to download and execute TruffleHog for automated credential theft.",
+        "severity": "High",
+        "enabled": true,
+        "query": "// Shai-Hulud TruffleHog Detection\n// Detects credential harvesting patterns from Sept-Nov 2025 npm supply chain attacks\nlet TruffleHogPatterns = dynamic([\n    \"trufflehog\",\n    \"TruffleHog\",\n    \"trufflesecurity\",\n    \"trufflehog filesystem\",\n    \"trufflehog git\"\n]);\nlet CredentialPatterns = dynamic([\n    \"AWS_ACCESS_KEY\",\n    \"AWS_SECRET_ACCESS_KEY\",\n    \"GITHUB_TOKEN\",\n    \"GH_TOKEN\",\n    \"GITLAB_TOKEN\",\n    \"NPM_TOKEN\",\n    \"NODE_AUTH_TOKEN\",\n    \"AZURE_CLIENT_SECRET\",\n    \"ARM_CLIENT_SECRET\",\n    \"DOCKER_PASSWORD\"\n]);\nlet SuspiciousDownloadPatterns = dynamic([\n    \"curl.*trufflehog\",\n    \"wget.*trufflehog\",\n    \"bunExecutable.*trufflehog\"\n]);\n// Detect TruffleHog references in container logs\nContainerLog\n| where TimeGenerated > ago(5m)\n| where LogEntry has_any (TruffleHogPatterns)\n    or LogEntry matches regex @\"trufflehog.*(filesystem|git|github|s3)\"\n    or (LogEntry has_any (CredentialPatterns) and LogEntry has_any (\"scan\", \"harvest\", \"extract\", \"dump\"))\n| extend\n    PodName = extract(\"pod=([^,]+)\", 1, tostring(LogEntrySource)),\n    Namespace = extract(\"namespace=([^,]+)\", 1, tostring(LogEntrySource)),\n    DetectionType = case(\n        LogEntry has \"trufflehog filesystem\", \"TruffleHog Filesystem Scan\",\n        LogEntry has \"trufflehog git\", \"TruffleHog Git Scan\",\n        LogEntry has_any (TruffleHogPatterns), \"TruffleHog Reference\",\n        LogEntry has_any (CredentialPatterns), \"Credential Harvesting Pattern\",\n        \"Unknown Pattern\"\n    ),\n    RiskLevel = case(\n        LogEntry matches regex @\"trufflehog.*(filesystem|/home|/Users)\", \"CRITICAL\",\n        LogEntry has_any (\"curl.*trufflehog\", \"wget.*trufflehog\"), \"CRITICAL\",\n        LogEntry has_any (CredentialPatterns), \"HIGH\",\n        \"MEDIUM\"\n    )\n| project\n    TimeGenerated,\n    PodName,\n    Namespace,\n    ContainerID,\n    DetectionType,\n    RiskLevel,\n    LogEntry\n| summarize\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated),\n    HitCount = count(),\n    DetectionTypes = make_set(DetectionType),\n    RiskLevels = make_set(RiskLevel),\n    SampleLogs = make_set(LogEntry, 5)\n    by PodName, Namespace",
+        "queryFrequency": "PT5M",
+        "queryPeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": ["CredentialAccess", "Collection"],
+        "techniques": ["T1552", "T1119"],
+        "alertRuleTemplateName": null,
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": true,
+            "lookbackDuration": "PT4H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Host"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": ["PodName", "Namespace"]
+          }
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "🚨 TruffleHog Credential Harvesting in {{PodName}}",
+          "alertDescriptionFormat": "Detected {{HitCount}} TruffleHog credential scanning events in pod '{{PodName}}' ({{Namespace}}). Detection types: {{DetectionTypes}}. This is associated with the Shai-Hulud npm supply chain attack."
+        },
+        "customDetails": {
+          "PodName": "PodName",
+          "Namespace": "Namespace",
+          "DetectionTypes": "DetectionTypes",
+          "RiskLevels": "RiskLevels",
+          "HitCount": "HitCount"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Host",
+            "fieldMappings": [
+              {
+                "identifier": "HostName",
+                "columnName": "PodName"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

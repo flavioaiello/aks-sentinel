@@ -1,0 +1,96 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "AKS Container Image from Untrusted Registry",
+    "description": "Detects containers using images from untrusted or public registries.",
+    "severity": "Medium",
+    "requiredDataConnectors": [
+      {
+        "connectorId": "AzureKubernetesService",
+        "dataTypes": ["AzureDiagnostics"]
+      }
+    ],
+    "tactics": ["InitialAccess", "Execution"],
+    "techniques": ["T1204"],
+    "version": "1.0.0"
+  },
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Log Analytics workspace name"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2025-09-01",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/aks-untrusted-registry')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "AKS Container Image from Untrusted Registry",
+        "description": "Detects when containers are created using images from untrusted or public registries instead of approved private registries.",
+        "severity": "Medium",
+        "enabled": true,
+        "query": "// Define trusted registries - customize this list for your organization\nlet TrustedRegistries = dynamic([\".azurecr.io\", \"mcr.microsoft.com\", \"gcr.io/gke-release\"]);\nAzureDiagnostics\n| where Category == \"kube-audit\"\n| where TimeGenerated > ago(5m)\n| extend log = parse_json(log_s)\n| extend verb = tostring(log.verb)\n| extend objectRef = log.objectRef\n| extend requestObject = log.requestObject\n| extend user = log.user\n| where verb in (\"create\", \"update\", \"patch\")\n| where objectRef.resource == \"pods\"\n| extend containers = requestObject.spec.containers\n| mv-expand container = containers\n| extend ContainerImage = tostring(container.image)\n| extend ImageRegistry = extract(@\"^([^/]+)\", 1, ContainerImage)\n| where not(ContainerImage has_any (TrustedRegistries))\n| where not(ContainerImage startswith \"sha256:\")\n| extend\n    PodName = tostring(objectRef.name),\n    Namespace = tostring(objectRef.namespace),\n    ContainerName = tostring(container.name),\n    Username = tostring(user.username),\n    ClusterName = Resource\n| where Namespace !in (\"kube-system\", \"gatekeeper-system\", \"azure-arc\")\n| project\n    TimeGenerated,\n    ClusterName,\n    Namespace,\n    PodName,\n    ContainerName,\n    ContainerImage,\n    ImageRegistry,\n    Username\n| summarize\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated),\n    Count = count()\n    by ClusterName, Namespace, PodName, ContainerName, ContainerImage, ImageRegistry, Username",
+        "queryFrequency": "PT5M",
+        "queryPeriod": "PT5M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": ["InitialAccess", "Execution"],
+        "techniques": ["T1204"],
+        "alertRuleTemplateName": null,
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Host"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": ["ClusterName", "ImageRegistry"]
+          }
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Untrusted Image Registry: {{ImageRegistry}}",
+          "alertDescriptionFormat": "Container '{{ContainerName}}' in pod '{{PodName}}' is using image from untrusted registry '{{ImageRegistry}}'. Image: {{ContainerImage}}"
+        },
+        "customDetails": {
+          "ClusterName": "ClusterName",
+          "Namespace": "Namespace",
+          "PodName": "PodName",
+          "ContainerImage": "ContainerImage",
+          "ImageRegistry": "ImageRegistry"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Host",
+            "fieldMappings": [
+              {
+                "identifier": "HostName",
+                "columnName": "ClusterName"
+              }
+            ]
+          },
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "Username"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

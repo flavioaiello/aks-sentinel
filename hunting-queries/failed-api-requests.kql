@@ -1,0 +1,64 @@
+// AKS Failed API Requests Analysis
+// Description: Analyzes failed API requests to identify potential attack patterns
+// Tactic: CredentialAccess, InitialAccess
+// Technique: T1110 - Brute Force
+
+let LookbackPeriod = 24h;
+let FailedStatusCodes = dynamic([401, 403, 404, 422]);
+
+AzureDiagnostics
+| where Category == "kube-audit"
+| where TimeGenerated > ago(LookbackPeriod)
+| extend log = parse_json(log_s)
+| extend responseStatus = log.responseStatus
+| extend statusCode = toint(responseStatus.code)
+| where statusCode in (FailedStatusCodes)
+| extend
+    verb = tostring(log.verb),
+    objectRef = log.objectRef,
+    user = log.user,
+    sourceIPs = log.sourceIPs,
+    userAgent = tostring(log.userAgent),
+    statusMessage = tostring(responseStatus.message)
+| extend
+    Resource_Type = tostring(objectRef.resource),
+    ResourceName = tostring(objectRef.name),
+    Namespace = tostring(objectRef.namespace),
+    Username = tostring(user.username),
+    UserGroups = tostring(user.groups),
+    SourceIP = tostring(sourceIPs[0]),
+    ClusterName = Resource
+| summarize
+    FailureCount = count(),
+    FirstFailure = min(TimeGenerated),
+    LastFailure = max(TimeGenerated),
+    StatusCodes = make_set(statusCode),
+    StatusMessages = make_set(statusMessage, 10),
+    Verbs = make_set(verb, 10),
+    ResourceTypes = make_set(Resource_Type, 20),
+    UserAgents = make_set(userAgent, 10)
+    by ClusterName, Username, SourceIP, bin(TimeGenerated, 1h)
+| extend FailureRate = FailureCount / datetime_diff('minute', LastFailure, FirstFailure)
+| where FailureCount > 5 // Only show significant failure patterns
+| extend
+    AttackIndicator = case(
+        FailureCount > 100, "High - Potential Brute Force",
+        FailureCount > 50, "Medium - Suspicious Activity",
+        FailureCount > 10, "Low - Elevated Failures",
+        "Info"
+    )
+| project
+    TimeGenerated,
+    ClusterName,
+    Username,
+    SourceIP,
+    FailureCount,
+    FailureRate,
+    AttackIndicator,
+    StatusCodes,
+    Verbs,
+    ResourceTypes,
+    UserAgents,
+    FirstFailure,
+    LastFailure
+| sort by FailureCount desc

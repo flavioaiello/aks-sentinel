@@ -1,0 +1,196 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 1,
+      "content": {
+        "json": "# AKS Security Overview\n\nThis workbook provides a comprehensive security overview of Azure Kubernetes Service (AKS) clusters monitored by Microsoft Sentinel.\n\n---"
+      },
+      "name": "header"
+    },
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "time-range",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "type": 4,
+            "isRequired": true,
+            "value": {
+              "durationMs": 86400000
+            },
+            "typeSettings": {
+              "selectableValues": [
+                { "durationMs": 3600000 },
+                { "durationMs": 14400000 },
+                { "durationMs": 43200000 },
+                { "durationMs": 86400000 },
+                { "durationMs": 172800000 },
+                { "durationMs": 604800000 },
+                { "durationMs": 2592000000 }
+              ]
+            }
+          },
+          {
+            "id": "cluster-param",
+            "version": "KqlParameterItem/1.0",
+            "name": "ClusterName",
+            "type": 2,
+            "isRequired": false,
+            "multiSelect": true,
+            "quote": "'",
+            "delimiter": ",",
+            "query": "AzureDiagnostics\n| where Category == \"kube-audit\"\n| distinct Resource\n| order by Resource asc",
+            "typeSettings": {
+              "additionalResourceOptions": ["value::all"]
+            },
+            "defaultValue": "value::all"
+          }
+        ]
+      },
+      "name": "parameters"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## Security Alerts Summary"
+      },
+      "name": "alerts-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "SecurityAlert\n| where TimeGenerated {TimeRange}\n| where AlertName has \"AKS\"\n| summarize Count = count() by AlertSeverity\n| order by case(AlertSeverity == \"Critical\", 1, AlertSeverity == \"High\", 2, AlertSeverity == \"Medium\", 3, 4)",
+        "size": 3,
+        "title": "Alerts by Severity",
+        "queryType": 0,
+        "visualization": "piechart"
+      },
+      "customWidth": "33",
+      "name": "alerts-severity-pie"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "SecurityAlert\n| where TimeGenerated {TimeRange}\n| where AlertName has \"AKS\"\n| summarize Count = count() by bin(TimeGenerated, 1h)\n| order by TimeGenerated asc",
+        "size": 0,
+        "title": "Alert Trend",
+        "queryType": 0,
+        "visualization": "timechart"
+      },
+      "customWidth": "67",
+      "name": "alerts-trend"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## Kubernetes API Activity"
+      },
+      "name": "api-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AzureDiagnostics\n| where Category == \"kube-audit\"\n| where TimeGenerated {TimeRange}\n| where '{ClusterName:label}' == 'All' or Resource in ({ClusterName})\n| extend log = parse_json(log_s)\n| extend verb = tostring(log.verb)\n| summarize Count = count() by verb\n| order by Count desc\n| take 10",
+        "size": 1,
+        "title": "API Operations by Verb",
+        "queryType": 0,
+        "visualization": "barchart"
+      },
+      "customWidth": "50",
+      "name": "api-verbs"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AzureDiagnostics\n| where Category == \"kube-audit\"\n| where TimeGenerated {TimeRange}\n| where '{ClusterName:label}' == 'All' or Resource in ({ClusterName})\n| extend log = parse_json(log_s)\n| extend responseStatus = log.responseStatus\n| extend statusCode = toint(responseStatus.code)\n| where statusCode in (401, 403)\n| extend user = log.user\n| extend sourceIPs = log.sourceIPs\n| extend Username = tostring(user.username)\n| extend SourceIP = tostring(sourceIPs[0])\n| summarize FailureCount = count() by Username, SourceIP\n| order by FailureCount desc\n| take 10",
+        "size": 1,
+        "title": "Top Authentication Failures",
+        "queryType": 0,
+        "visualization": "table"
+      },
+      "customWidth": "50",
+      "name": "auth-failures"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## High-Risk Activities"
+      },
+      "name": "risk-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AzureDiagnostics\n| where Category == \"kube-audit\"\n| where TimeGenerated {TimeRange}\n| where '{ClusterName:label}' == 'All' or Resource in ({ClusterName})\n| extend log = parse_json(log_s)\n| extend verb = tostring(log.verb)\n| extend objectRef = log.objectRef\n| extend user = log.user\n| where verb in (\"create\", \"update\", \"patch\")\n| where objectRef.resource == \"pods\" and objectRef.subresource == \"exec\"\n| extend Username = tostring(user.username)\n| extend PodName = tostring(objectRef.name)\n| extend Namespace = tostring(objectRef.namespace)\n| where not(Username startswith \"system:\")\n| project TimeGenerated, Resource, Namespace, PodName, Username\n| order by TimeGenerated desc\n| take 50",
+        "size": 0,
+        "title": "Recent Kubectl Exec Commands",
+        "queryType": 0,
+        "visualization": "table"
+      },
+      "customWidth": "50",
+      "name": "kubectl-exec"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AzureDiagnostics\n| where Category == \"kube-audit\"\n| where TimeGenerated {TimeRange}\n| where '{ClusterName:label}' == 'All' or Resource in ({ClusterName})\n| extend log = parse_json(log_s)\n| extend verb = tostring(log.verb)\n| extend objectRef = log.objectRef\n| extend user = log.user\n| where objectRef.resource == \"secrets\"\n| where verb in (\"get\", \"list\")\n| extend Username = tostring(user.username)\n| where not(Username startswith \"system:\")\n| summarize AccessCount = count() by Username\n| order by AccessCount desc\n| take 10",
+        "size": 1,
+        "title": "Top Secret Accessors",
+        "queryType": 0,
+        "visualization": "barchart"
+      },
+      "customWidth": "50",
+      "name": "secret-access"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## Container Security"
+      },
+      "name": "container-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AzureDiagnostics\n| where Category == \"kube-audit\"\n| where TimeGenerated {TimeRange}\n| where '{ClusterName:label}' == 'All' or Resource in ({ClusterName})\n| extend log = parse_json(log_s)\n| extend verb = tostring(log.verb)\n| extend objectRef = log.objectRef\n| extend requestObject = log.requestObject\n| where verb == \"create\"\n| where objectRef.resource == \"pods\"\n| extend containers = requestObject.spec.containers\n| mv-expand container = containers\n| extend securityContext = container.securityContext\n| extend\n    Privileged = tobool(securityContext.privileged),\n    HostNetwork = tobool(requestObject.spec.hostNetwork),\n    RunAsRoot = tostring(securityContext.runAsUser) == \"0\"\n| summarize\n    PrivilegedCount = countif(Privileged == true),\n    HostNetworkCount = countif(HostNetwork == true),\n    RootCount = countif(RunAsRoot == true)\n    by Resource",
+        "size": 1,
+        "title": "High-Risk Container Configurations by Cluster",
+        "queryType": 0,
+        "visualization": "table"
+      },
+      "name": "container-risk"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## Network Activity"
+      },
+      "name": "network-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AzureDiagnostics\n| where Category == \"kube-audit\"\n| where TimeGenerated {TimeRange}\n| where '{ClusterName:label}' == 'All' or Resource in ({ClusterName})\n| extend log = parse_json(log_s)\n| extend verb = tostring(log.verb)\n| extend objectRef = log.objectRef\n| extend requestObject = log.requestObject\n| where verb == \"create\"\n| where objectRef.resource == \"services\"\n| extend ServiceType = tostring(requestObject.spec.type)\n| where ServiceType in (\"NodePort\", \"LoadBalancer\")\n| extend ServiceName = tostring(objectRef.name)\n| extend Namespace = tostring(objectRef.namespace)\n| project TimeGenerated, Resource, Namespace, ServiceName, ServiceType\n| order by TimeGenerated desc",
+        "size": 0,
+        "title": "External Service Exposure",
+        "queryType": 0,
+        "visualization": "table"
+      },
+      "name": "external-services"
+    }
+  ],
+  "fallbackResourceIds": [],
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+}
